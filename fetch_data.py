@@ -38,6 +38,8 @@ TAIFEX_LARGE_URL = "https://www.taifex.com.tw/cht/3/largeTraderFutDown"
 TAIFEX_VIX_URL = "https://www.taifex.com.tw/cht/7/vixDaily3MNew"
 TAIFEX_OPT_URL = "https://www.taifex.com.tw/cht/3/callsAndPutsDateDown"
 TAIFEX_OPT_LARGE_URL = "https://www.taifex.com.tw/cht/3/largeTraderOptDown"
+DIV_URL = "https://www.twse.com.tw/rwd/zh/exRight/TWT49U?startDate={a}&endDate={b}&response=json"
+MONTHLY_START = "2014-12"
 STOCK_RE = re.compile(r"^[1-9]\d{3}$")   # 指數成分：一般股票，不含 ETF
 HIST_START = (2000, 1)
 
@@ -609,6 +611,149 @@ def update_futures(today):
         json.dump(out, fh, ensure_ascii=False, separators=(",", ":"))
 
 
+def parse_prices_value(j):
+    """收盤價＋成交金額（月底資料用）。"""
+    res = {}
+    for fields, data in tables(j):
+        f = [clean(x) for x in fields]
+        if "證券代號" not in f or "收盤價" not in f:
+            continue
+        ic, inm, ip = f.index("證券代號"), f.index("證券名稱"), f.index("收盤價")
+        iv = f.index("成交金額") if "成交金額" in f else -1
+        for row in data:
+            code = clean(row[ic])
+            close = num(clean(row[ip]))
+            if CODE_RE.match(code) and close and close > 0:
+                res[code] = [close, num(clean(row[iv])) if iv >= 0 else 0, clean(row[inm])]
+    return res
+
+
+def update_monthly(taiex_rows, today):
+    """真實回測資料：每月最後交易日收盤價（含成交金額），用除權息資料還原配息。"""
+    raw_path_ = os.path.join(DATA, "monthly_raw.json")
+    raw = {}
+    if os.path.exists(raw_path_):
+        with open(raw_path_, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    # 每月最後一個交易日（不含本月）
+    ends = {}
+    for d in taiex_rows:
+        ym = d[:7]
+        if ym >= MONTHLY_START and ym < today.strftime("%Y-%m"):
+            ends[ym] = max(ends.get(ym, d), d)
+    todo = [ym for ym in sorted(ends) if ym not in raw or raw[ym].get("d") != ends[ym]]
+    print(f"月底資料：要抓 {len(todo)} 個月", flush=True)
+    for ym in todo:
+        d = ends[ym]
+        j = get_json(PRICE_URL.format(d=d.replace("-", "")))
+        time.sleep(PAUSE)
+        if not j or j.get("stat") != "OK":
+            continue
+        pv = parse_prices_value(j)
+        if not pv:
+            continue
+        # 只留成交金額前 250 名和 ETF 0050，控制檔案大小
+        keep = sorted((c for c in pv if not c.startswith("00")), key=lambda c: -(pv[c][1] or 0))[:250]
+        if "0050" in pv:
+            keep.append("0050")
+        raw[ym] = {"d": d, "p": {c: pv[c] for c in keep}}
+        with open(raw_path_, "w", encoding="utf-8") as fh:
+            json.dump(raw, fh, ensure_ascii=False, separators=(",", ":"))
+    # 除權息還原因子：除權息前收盤價 ÷ 除權息參考價
+    div_path = os.path.join(DATA, "dividends.json")
+    divs = {}
+    if os.path.exists(div_path):
+        with open(div_path, encoding="utf-8") as fh:
+            divs = json.load(fh)
+    y0 = int(MONTHLY_START[:4])
+    for y in range(y0, today.year + 1):
+        ys = str(y)
+        if ys in divs and y < today.year - 1:
+            continue
+        j = get_json(DIV_URL.format(a=f"{y}0101", b=f"{y}1231"))
+        time.sleep(PAUSE)
+        if not j or j.get("stat") != "OK":
+            continue
+        f = [clean(x) for x in j.get("fields") or []]
+        try:
+            idd, ic = f.index("資料日期"), f.index("股票代號")
+            ib = next(i for i, x in enumerate(f) if x.startswith("除權息前收盤價"))
+            ir = next(i for i, x in enumerate(f) if x.startswith("除權息參考價"))
+        except (ValueError, StopIteration):
+            print("除權息欄位看不懂", f, flush=True)
+            continue
+        ev = []
+        for row in j.get("data") or []:
+            m = re.match(r"^(\d{2,3})年(\d{1,2})月(\d{1,2})日", clean(row[idd]))
+            iso = f"{int(m.group(1)) + 1911:04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}" if m else roc_to_iso(row[idd])
+            b, r = num(clean(row[ib])), num(clean(row[ir]))
+            if iso and b and r and 1 < b / r < 3:
+                ev.append([iso, clean(row[ic]), round(b / r, 6)])
+        divs[ys] = ev
+        print(f"除權息 {y}：{len(ev)} 筆", flush=True)
+    with open(div_path, "w", encoding="utf-8") as fh:
+        json.dump(divs, fh, ensure_ascii=False, separators=(",", ":"))
+    factors = {}
+    for ev in divs.values():
+        for iso, code, fct in ev:
+            factors.setdefault(code, []).append((iso, fct))
+    months = sorted(raw)
+    if len(months) < 24:
+        print("月底資料不足，暫不產生回測檔", flush=True)
+        return
+    # 每月選股池：近 3 個月月底成交金額平均前 50 名（不含 ETF）
+    univ, codes, names = [], set(["0050"]), {}
+    for i, ym in enumerate(months):
+        score = {}
+        for k in range(max(0, i - 2), i + 1):
+            for c, v in raw[months[k]]["p"].items():
+                if not c.startswith("00"):
+                    score[c] = score.get(c, 0) + (v[1] or 0)
+        top = [c for c, _ in sorted(score.items(), key=lambda x: -x[1])[:50] if c in raw[ym]["p"]]
+        univ.append(top)
+        codes.update(top)
+        for c, v in raw[ym]["p"].items():
+            names[c] = v[2]
+    p = {}
+    for c in sorted(codes):
+        ser, prev_close, prev_d, adj = [], None, None, None
+        evs = sorted(factors.get(c, []))
+        for ym in months:
+            v = raw[ym]["p"].get(c)
+            d = raw[ym]["d"]
+            if not v:
+                ser.append(None); prev_close = None; adj = None; prev_d = d
+                continue
+            close = v[0]
+            if prev_close is None or adj is None:
+                adj = close
+            else:
+                f = 1.0
+                for iso, fct in evs:
+                    if prev_d < iso <= d:
+                        f *= fct
+                r = close / prev_close * f
+                # 股票分割（例如 0050 在 2025 年 1 拆 4）或減資：價格突然變成幾分之一或幾倍
+                for n_ in (2, 3, 4, 5, 8, 10):
+                    if r < 0.6 and abs(r * n_ - 1) < 0.15:
+                        r *= n_
+                        print(f"  {c} {ym} 偵測到 1 拆 {n_}，已還原", flush=True)
+                        break
+                    if r > 1.8 and abs(r / n_ - 1) < 0.15:
+                        r /= n_
+                        print(f"  {c} {ym} 偵測到減資 {n_} 比 1，已還原", flush=True)
+                        break
+                adj = adj * r
+            ser.append(round(adj, 4))
+            prev_close, prev_d = close, d
+        p[c] = ser
+    out = {"updated": dt.datetime.now(TPE).strftime("%Y-%m-%d %H:%M"), "months": months, "p": p, "univ": univ,
+           "names": {c: names.get(c, c) for c in codes}}
+    with open(os.path.join(DATA, "monthly.json"), "w", encoding="utf-8") as fh:
+        json.dump(out, fh, ensure_ascii=False, separators=(",", ":"))
+    print(f"真實回測資料：{len(months)} 個月，{len(codes)} 檔", flush=True)
+
+
 def rebuild():
     files = sorted(f for f in os.listdir(RAW) if f.endswith(".json")) if os.path.isdir(RAW) else []
     for old in files[:-KEEP_DAYS]:
@@ -672,7 +817,8 @@ def main():
     rebuild()
     closes = update_taiex(today)
     build_market(closes)
-    for step in (lambda: build_contrib(closes, update_shares()), lambda: update_futures(today)):
+    for step in (lambda: build_contrib(closes, update_shares()), lambda: update_futures(today),
+                 lambda: update_monthly(sorted(closes), today)):
         try:
             step()
         except Exception as e:  # 單一功能失敗不影響其他資料
