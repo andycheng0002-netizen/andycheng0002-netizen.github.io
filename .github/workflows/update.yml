@@ -1,0 +1,50 @@
+name: 更新股市資料
+
+on:
+  schedule:
+    - cron: "30 9 * * 1-5"
+    - cron: "30 13 * * 1-5"
+  push:
+    branches: [main]
+    paths-ignore: ["data/**"]
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: "補抓幾個交易日（第一次填 100，平常留 0）"
+        default: "0"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 抓證交所資料
+        env:
+          BACKFILL: ${{ inputs.backfill }}
+        run: python3 fetch_data.py --backfill "${BACKFILL:-0}"
+      - name: 存檔
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          git diff --cached --quiet || git commit -m "更新股市資料"
+          git push
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deploy
+        uses: actions/deploy-pages@v4
