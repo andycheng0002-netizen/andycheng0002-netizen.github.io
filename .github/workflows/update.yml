@@ -3,7 +3,8 @@ name: 更新股市資料
 on:
   schedule:
     - cron: "30 9 * * 1-5"
-    - cron: "30 13 * * 1-5"
+    - cron: "30 14 * * 1-5"
+    - cron: "*/30 1-5 * * 1-5"
   push:
     branches: [main]
     paths-ignore: ["data/**"]
@@ -25,7 +26,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -34,13 +35,20 @@ jobs:
       - name: 抓證交所資料
         env:
           BACKFILL: ${{ inputs.backfill }}
-        run: python3 fetch_data.py --backfill "${BACKFILL:-0}"
+          SCHED: ${{ github.event.schedule }}
+        run: |
+          if [ "$SCHED" = "*/30 1-5 * * 1-5" ]; then
+            python3 fetch_data.py --intraday
+          else
+            python3 fetch_data.py --backfill "${BACKFILL:-0}"
+          fi
       - name: 存檔
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data
           git diff --cached --quiet || git commit -m "更新股市資料"
+          git pull --rebase
           git push
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
