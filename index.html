@@ -488,7 +488,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
   <!-- ============ 策略回測 ============ -->
   <div class="view" id="view-backtest" hidden>
     <p class="small" style="margin:0;text-align:right"><a href="#data">資料狀態與匯入 ›</a></p>
-    <p class="lede">六種不同邏輯的選股策略，每個月和 0050 對打。看的不只是最後賺多少，還有每個月到底贏幾次、最慘跌多深。</p>
+    <p class="lede">不同邏輯的選股策略，每個月和 0050 對打，只留下最大回撤不比 0050 深的。看的不只是最後賺多少，還有每個月到底贏幾次、最慘跌多深。</p>
     <section>
       <div class="label">策略排行（點一列看細節）</div>
       <div class="panel tablebox">
@@ -500,7 +500,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       <div class="small muted" id="periodNote"></div>
     </section>
 
-    <section>
+    <section id="btDetail">
       <div class="detail-head">
         <h2 id="dName"></h2>
         <p id="dDesc"></p>
@@ -549,20 +549,20 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
     <section>
       <div class="label">策略回測用的月資料</div>
       <div class="panel" style="display:flex;flex-direction:column;gap:10px">
-        <p class="small muted" style="margin:0">每列一個月，第一欄日期，之後每欄一檔股票的<b>還原月收盤價</b>。一定要有 <code>0050</code> 欄，有 <code>00631L</code> 欄才會跑「正2＋均線」。至少 18 個月。資料只存在這支手機。</p>
-        <textarea id="csvIn" spellcheck="false" placeholder="date,0050,00631L,2330,2317,2454,2308,2382,2881,2891,1301"></textarea>
+        <p class="small muted" style="margin:0">每列一個月，第一欄日期，之後每欄一檔股票的<b>還原月收盤價</b>。一定要有 <code>0050</code> 欄，至少 18 個月。資料只存在這支手機。</p>
+        <textarea id="csvIn" spellcheck="false" placeholder="date,0050,2330,2317,2454,2308,2382,2881,2891,1301"></textarea>
         <div class="row">
           <button id="applyBtn">套用回測資料</button>
           <label class="filebtn">選擇 CSV 檔<input type="file" id="fileIn" accept=".csv,text/csv,text/plain"></label>
-          <button class="ghost" id="demoBtn">改回模擬數據</button>
+          <button class="ghost" id="demoBtn">改回證交所資料</button>
         </div>
         <div class="msg" id="msg"></div>
         <details>
           <summary>CSV 範例格式</summary>
-          <pre class="sample">date,0050,00631L,2330,2317,2454
-2023-01,118.2,96.4,512.0,98.1,742
-2023-02,121.5,101.8,524.0,99.6,760
-2023-03,123.0,104.3,540.0,101.2,771</pre>
+          <pre class="sample">date,0050,2330,2317,2454
+2023-01,118.2,512.0,98.1,742
+2023-02,121.5,524.0,99.6,760
+2023-03,123.0,540.0,101.2,771</pre>
           <p class="small muted">數字只是格式示意，不是真實股價。</p>
         </details>
       </div>
@@ -902,14 +902,22 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
     }
     return buildData(dates, p);
   }
-  function buildData(dates, p) {
+  function buildData(dates, p, univ, names) {
     var r = {};
     Object.keys(p).forEach(function (k) {
-      r[k] = [0];
-      for (var t = 1; t < dates.length; t++) r[k].push(p[k][t] / p[k][t - 1] - 1);
+      r[k] = [null];
+      for (var t = 1; t < dates.length; t++) {
+        var a = p[k][t - 1], b = p[k][t];
+        r[k].push(a > 0 && b > 0 ? b / a - 1 : null);
+      }
     });
     var uni = Object.keys(p).filter(function (k) { return k !== "0050" && k !== "00631L"; });
-    return { dates: dates, p: p, r: r, uni: uni, n: dates.length, hasLev: !!p["00631L"] };
+    return { dates: dates, p: p, r: r, uni: uni, univ: univ || null, names: names || {}, n: dates.length };
+  }
+  function buildReal(j) {
+    var D = buildData(j.months, j.p, j.univ, j.names);
+    D.real = true; D.updated = j.updated;
+    return D;
   }
   function parseCSV(text) {
     var lines = text.replace(/\r/g, "").split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
@@ -932,48 +940,73 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       });
     }
     var D = buildData(dates, p);
-    if (D.uni.length < 3) throw new Error("選股池至少要 3 檔股票（0050、00631L 以外的欄位）。");
+    if (D.uni.length < 3) throw new Error("選股池至少要 3 檔股票（0050 以外的欄位）。");
     return D;
   }
   function topK(list, k, desc) { return list.slice().sort(function (a, b) { return desc ? b[1] - a[1] : a[1] - b[1]; }).slice(0, k); }
-  function eqw(keys, total) { var w = {}; keys.forEach(function (k) { w[k] = (w[k] || 0) + total / keys.length; }); return w; }
+  function eqw(keys, total) { var w = {}; if (!keys.length) return w; keys.forEach(function (k) { w[k] = (w[k] || 0) + total / keys.length; }); return w; }
   function sma(arr, t, n) { var s = 0; for (var i = t - n + 1; i <= t; i++) s += arr[i]; return s / n; }
   function stdev(arr, a, b) { var x = arr.slice(a, b + 1), m = x.reduce(function (s, v) { return s + v; }, 0) / x.length; return Math.sqrt(x.reduce(function (s, v) { return s + (v - m) * (v - m); }, 0) / x.length); }
   function names(l) { return l.map(function (x) { return x[0]; }); }
+  // 當月可選的股票：在當時的選股池裡，而且過去 lb 個月每個月都有價格
+  function elig(t, D, lb) {
+    var pool = D.univ ? D.univ[t] || [] : D.uni;
+    return pool.filter(function (k) {
+      var p = D.p[k]; if (!p) return false;
+      for (var i = t - lb; i <= t; i++) if (!(p[i] > 0)) return false;
+      return true;
+    });
+  }
+  function momScore(D, k, t, n) { return D.p[k][t] / D.p[k][t - n] - 1; }
+  function above0050MA(D, t) { return D.p["0050"][t] > sma(D.p["0050"], t, 10); }
+  var NPICK = 5;
 
   var S = {
     mom: { name: "動能輪動", tag: "追強勢股",
-      desc: "每月底挑出過去 6 個月漲最多的 3 檔，平均分配資金持有一個月，下個月重新排名。邏輯是強者恆強，漲勢通常會延續一段時間。",
-      risk: "風險：趨勢反轉時容易買在高點；每月換股，交易成本會吃掉一部分報酬。",
-      fn: function (t, D) { return eqw(names(topK(D.uni.map(function (k) { return [k, D.p[k][t] / D.p[k][t - 6] - 1]; }), 3, true)), 1); } },
-    trend: { name: "均線避險", tag: "0050＋10月均線",
-      desc: "0050 月收盤價在 10 個月均線之上就持有 0050，跌破就全部轉成現金。目標不是多賺，而是在大跌時少輸，靠避開空頭月份贏回來。",
+      desc: "每月底從當時成交最熱絡的 50 檔裡，挑過去 6 個月漲最多的 5 檔平均持有，下個月重新排名。邏輯是強者恆強。",
+      risk: "風險：趨勢反轉時容易買在高點，回撤常比 0050 深；每月換股，交易成本會吃掉一部分報酬。",
+      fn: function (t, D) { return eqw(names(topK(elig(t, D, 6).map(function (k) { return [k, momScore(D, k, t, 6)]; }), NPICK, true)), 1); } },
+    trend: { name: "均線避險", tag: "0050＋10 月均線",
+      desc: "0050 月收盤價（含息）在 10 個月均線之上就持有 0050，跌破就全部轉成現金。目標是在大跌時少輸。",
       risk: "風險：盤整時會反覆進出、被來回巴；多頭年份通常跑輸 0050。",
-      fn: function (t, D) { return D.p["0050"][t] > sma(D.p["0050"], t, 10) ? { "0050": 1 } : {}; } },
-    lev: { name: "正2＋均線", tag: "00631L 槓桿", needLev: true,
-      desc: "0050 在 10 個月均線之上時持有兩倍槓桿 ETF（00631L），跌破就轉成現金。多頭時用槓桿放大報酬，空頭時靠均線避開槓桿最怕的長期下跌。",
-      risk: "風險：波動和回撤都約是 0050 的兩倍；急跌一個月內就可能虧兩成以上，均線來不及反應。",
-      fn: function (t, D) { return D.p["0050"][t] > sma(D.p["0050"], t, 10) ? { "00631L": 1 } : {}; } },
+      fn: function (t, D) { return above0050MA(D, t) ? { "0050": 1 } : {}; } },
+    half: { name: "均線減碼", tag: "跌破均線留半倉",
+      desc: "0050 在 10 個月均線之上時全部持有；跌破均線時只減碼一半，留 50% 在 0050。比「均線避險」溫和，少被來回巴，也不會完全錯過反彈。",
+      risk: "風險：大空頭時仍有一半曝險；多頭時和 0050 幾乎一樣，很難大幅領先。",
+      fn: function (t, D) { return { "0050": above0050MA(D, t) ? 1 : 0.5 }; } },
+    momtrend: { name: "動能＋均線濾網", tag: "多頭追強、空頭退場",
+      desc: "大盤（0050）在 10 個月均線之上時，執行動能輪動（最強 5 檔）；跌破均線就全部轉成現金。想保留動能的爆發力，同時用均線擋掉大空頭。",
+      risk: "風險：均線訊號落後，急跌的第一個月擋不住；換股頻繁，成本較高。",
+      fn: function (t, D) { return above0050MA(D, t) ? S.mom.fn(t, D) : {}; } },
+    riskmom: { name: "穩健動能", tag: "漲得多又漲得穩",
+      desc: "從熱門 50 檔裡，用「過去 12 個月報酬 ÷ 月報酬波動」排名，挑分數最高的 5 檔。偏好穩定上漲的股票，避開暴漲暴跌的題材股。",
+      risk: "風險：盤勢急轉時一樣會跌；選出的股票常集中在同一個產業。",
+      fn: function (t, D) {
+        return eqw(names(topK(elig(t, D, 12).map(function (k) {
+          var sd = stdev(D.r[k], t - 11, t) || 1e-9; return [k, momScore(D, k, t, 12) / sd];
+        }), NPICK, true)), 1);
+      } },
     lowvol: { name: "低波動", tag: "選最穩的股",
-      desc: "每月挑出過去 12 個月月報酬波動最小的 3 檔平均持有。學術研究常見的「低波動異常」：穩定的股票長期風險調整後報酬不輸高波動股。",
-      risk: "風險：大多頭時漲得比大盤慢，月勝率可能偏低，要看的是回撤和穩定度。",
-      fn: function (t, D) { return eqw(names(topK(D.uni.map(function (k) { return [k, stdev(D.r[k], t - 11, t)]; }), 3, false)), 1); } },
+      desc: "每月從熱門 50 檔裡挑過去 12 個月月報酬波動最小的 5 檔平均持有。研究常見的「低波動異常」：穩定的股票長期風險調整後報酬不輸高波動股。",
+      risk: "風險：大多頭時漲得比大盤慢，月勝率可能偏低。",
+      fn: function (t, D) { return eqw(names(topK(elig(t, D, 12).map(function (k) { return [k, stdev(D.r[k], t - 11, t)]; }), NPICK, false)), 1); } },
     rev: { name: "跌深反彈", tag: "逆勢均值回歸",
-      desc: "每月買進上個月跌最多的 3 檔，賭短期超跌後會反彈。和動能輪動是相反的邏輯，兩者放在一起看，可以知道你的選股池比較適合追強還是撿便宜。",
+      desc: "每月買進熱門 50 檔裡上個月跌最多的 5 檔，賭短期超跌後會反彈。",
       risk: "風險：跌深的股票有時是基本面真的變差，會越跌越深（接刀子）。",
-      fn: function (t, D) { return eqw(names(topK(D.uni.map(function (k) { return [k, D.r[k][t]]; }), 3, false)), 1); } },
-    core: { name: "核心衛星", tag: "70% 0050＋30% 動能",
-      desc: "70% 資金長抱 0050 當核心，30% 放在過去 6 個月最強的 2 檔股票。報酬貼近 0050，只想靠衛星部位每月多贏一點點。",
+      fn: function (t, D) { return eqw(names(topK(elig(t, D, 1).map(function (k) { return [k, D.r[k][t]]; }), NPICK, false)), 1); } },
+    core: { name: "核心衛星", tag: "70% 0050＋30% 穩健動能",
+      desc: "70% 資金長抱 0050 當核心，30% 放在「穩健動能」挑出的股票。報酬貼近 0050，想靠衛星部位每月多贏一點。",
       risk: "風險：衛星部位選錯時一樣會拖累績效；因為大部分是 0050，很難大幅領先。",
-      fn: function (t, D) { var w = eqw(names(topK(D.uni.map(function (k) { return [k, D.p[k][t] / D.p[k][t - 6] - 1]; }), 2, true)), 0.3); w["0050"] = (w["0050"] || 0) + 0.7; return w; } }
+      fn: function (t, D) { var w = {}, sat = S.riskmom.fn(t, D); Object.keys(sat).forEach(function (k) { w[k] = sat[k] * 0.3; }); w["0050"] = (w["0050"] || 0) + (Object.keys(sat).length ? 0.7 : 1); return w; } }
   };
-  var ORDER = ["mom", "trend", "lev", "lowvol", "rev", "core"], START = 12;
+  var ORDER = ["mom", "trend", "half", "momtrend", "riskmom", "lowvol", "rev", "core"], START = 12;
 
   function backtest(D, key, cost) {
     var s = S[key], out = [], prev = {};
     for (var t = START; t < D.n - 1; t++) {
+      if (!(D.r["0050"][t + 1] != null)) continue;
       var w = s.fn(t, D), ret = 0, turn = 0, keys = {};
-      Object.keys(w).forEach(function (k) { ret += w[k] * D.r[k][t + 1]; keys[k] = 1; });
+      Object.keys(w).forEach(function (k) { var rr = D.r[k][t + 1]; ret += w[k] * (rr == null ? 0 : rr); keys[k] = 1; });
       Object.keys(prev).forEach(function (k) { keys[k] = 1; });
       Object.keys(keys).forEach(function (k) { turn += Math.abs((w[k] || 0) - (prev[k] || 0)); });
       out.push({ date: D.dates[t + 1], ret: ret - turn * cost, bench: D.r["0050"][t + 1], w: w });
@@ -989,22 +1022,27 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
   function holdLabel(w) {
     var ks = Object.keys(w).filter(function (k) { return w[k] > 0.0001; });
     if (!ks.length) return "現金";
-    return ks.map(function (k) { return esc(k) + " " + Math.round(w[k] * 100) + "%"; }).join(" · ");
+    var nm = (state.D && state.D.names) || {};
+    return ks.map(function (k) { return esc(nm[k] || k) + " " + Math.round(w[k] * 100) + "%"; }).join(" · ");
   }
   function runAll() {
     state.results = {};
     ORDER.forEach(function (k) {
-      if (S[k].needLev && !state.D.hasLev) return;
       var bt = backtest(state.D, k, state.cost), st = stats(bt.map(function (x) { return x.ret; }));
       st.win = bt.filter(function (x) { return x.ret > x.bench; }).length / bt.length;
       state.results[k] = { bt: bt, st: st };
     });
-    if (!state.results[state.sel]) state.sel = "mom";
-    state.benchStats = stats(state.results[state.sel].bt.map(function (x) { return x.bench; }));
+    var any = state.results[ORDER[0]];
+    state.benchStats = stats(any.bt.map(function (x) { return x.bench; }));
+    // 只保留最大回撤不比 0050 深的策略
+    var bm = state.benchStats.mdd;
+    state.pass = ORDER.filter(function (k) { return state.results[k] && state.results[k].st.mdd >= bm; });
+    state.drop = ORDER.filter(function (k) { return state.results[k] && state.results[k].st.mdd < bm; });
+    if (state.pass.indexOf(state.sel) < 0) state.sel = state.pass[0] || null;
   }
   function renderRank() {
     var b = state.benchStats, rows = [];
-    ORDER.filter(function (k) { return state.results[k]; })
+    state.pass.slice()
       .sort(function (a, c) { return state.results[c].st.cagr - state.results[a].st.cagr; })
       .forEach(function (k) {
         var st = state.results[k].st;
@@ -1015,11 +1053,13 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       });
     rows.push('<tr class="bench"><td><span class="sname">0050 基準</span><span class="stag">買進持有</span></td>' +
       '<td class="num">' + pct(b.cagr) + '</td><td class="num">—</td><td class="num">' + pct(b.mdd) + '</td></tr>');
+    if (!state.pass.length) rows.unshift('<tr><td colspan="4" class="muted" style="white-space:normal">目前沒有任何策略的最大回撤比 0050 淺。</td></tr>');
     document.querySelector("#rankTable tbody").innerHTML = rows.join("");
-    var bt = state.results[state.sel].bt;
-    var note = (state.demo ? "目前是模擬數據。" : "") + "回測期間 " + bt[0].date + " 至 " + bt[bt.length - 1].date + "，共 " + bt.length + " 個月。年化報酬紅色代表贏過 0050。";
-    if (!state.D.hasLev) note += " 資料中沒有 00631L，所以「正2＋均線」未列入。";
+    var bt = state.results[ORDER[0]].bt;
+    var note = (state.demo ? "目前是模擬數據（證交所真實資料還沒準備好）。" : state.D.real ? "證交所真實資料，股價含配息還原，選股池為每月成交金額前 50 大。" : "") + "回測期間 " + bt[0].date + " 至 " + bt[bt.length - 1].date + "，共 " + bt.length + " 個月。年化報酬紅色代表贏過 0050。只列出最大回撤不比 0050 深（" + pct(b.mdd) + "）的策略。";
+    if (state.drop.length) note += " 已排除：" + state.drop.map(function (k) { return S[k].name + "（回撤 " + pct(state.results[k].st.mdd) + "）"; }).join("、") + "。";
     $("periodNote").textContent = note;
+    $("btDetail").hidden = !state.sel;
   }
   function prevMonth(d) { var y = +d.slice(0, 4), m = +d.slice(5, 7) - 1; if (m < 1) { m = 12; y--; } return y + "-" + (m < 10 ? "0" : "") + m; }
   function renderEq(bt) {
@@ -1069,6 +1109,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
     $("exChart").innerHTML = g;
   }
   function renderDetail() {
+    if (!state.sel) return;
     var k = state.sel, res = state.results[k], st = res.st, b = state.benchStats, bt = res.bt;
     $("dName").textContent = S[k].name + "　vs　0050";
     $("dDesc").textContent = S[k].desc; $("dRisk").textContent = S[k].risk;
@@ -1733,7 +1774,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
   function renderBadge() {
     var view = currentView(), badge = $("dataBadge");
     if (view === "backtest") {
-      badge.textContent = state.demo ? "回測：模擬數據" : "回測：你的資料";
+      badge.textContent = state.demo ? "回測：模擬數據" : state.D.real ? "回測：證交所真實資料" : "回測：你匯入的資料";
       badge.className = state.demo ? "badge" : "badge real";
     } else {
       if (!INDEX) { badge.textContent = "讀取中"; badge.className = "badge real"; return; }
@@ -1751,7 +1792,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       parts.push("股票數：" + INDEX.stocks.length + " 檔上市股票與 ETF");
       parts.push("最後更新：" + INDEX.updated + "（台北時間）");
     }
-    parts.push("策略回測：" + (state.demo ? "模擬數據" : "你的資料，" + state.D.n + " 個月"));
+    parts.push("策略回測：" + (state.demo ? "模擬數據（真實資料還沒準備好）" : state.D.real ? "證交所真實資料，" + state.D.dates[0] + " 至 " + state.D.dates[state.D.n - 1] + "，配息還原" : "你匯入的資料，" + state.D.n + " 個月"));
     $("dataSummary").innerHTML = parts.map(esc).join("<br>");
   }
   var VIEWS = ["stock", "market", "contrib", "futures", "backtest", "data"];
@@ -1811,7 +1852,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
   }
   $("applyBtn").addEventListener("click", function () { applyBacktest($("csvIn").value, true); });
   $("demoBtn").addEventListener("click", function () {
-    state.D = makeDemo(); state.demo = true; renderBacktest(); LS.del(STORE_KEY);
+    LS.del(STORE_KEY); state.D = makeDemo(); state.demo = true; renderBacktest(); loadRealBacktest();
     $("msg").className = "msg"; $("msg").textContent = "回測已改回模擬數據。";
     renderSummary(); renderBadge();
   });
@@ -1819,7 +1860,15 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
   /* ---------- Boot ---------- */
   var saved = LS.get(STORE_KEY);
   if (saved) { try { state.D = parseCSV(saved); state.demo = false; $("csvIn").value = saved; } catch (e) { state.D = makeDemo(); } }
-  else state.D = makeDemo();
+  else { state.D = makeDemo(); }
+  function loadRealBacktest() {
+    if (LS.get(STORE_KEY)) return;
+    getJSON("data/monthly.json?t=" + Date.now()).then(function (j) {
+      if (!j || !j.months || j.months.length < 24 || LS.get(STORE_KEY)) return;
+      try { state.D = buildReal(j); state.demo = false; renderBacktest(); renderBadge(); renderSummary(); } catch (e) {}
+    });
+  }
+  loadRealBacktest();
   renderBacktest();
   route();
   $("sTitle").textContent = "讀取資料中…";
