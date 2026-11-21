@@ -35,7 +35,7 @@ MIS_STOCKS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ch}&
 SHARES_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
 TAIFEX_INST_URL = "https://www.taifex.com.tw/cht/3/futContractsDateDown"
 TAIFEX_LARGE_URL = "https://www.taifex.com.tw/cht/3/largeTraderFutDown"
-TAIFEX_VIX_URL = "https://www.taifex.com.tw/cht/7/vixDaily3MNew"
+TAIFEX_VIX_URL = "https://www.taifex.com.tw/file/taifex/Dailydownload/vix/log2data/{ym}new.txt"
 TAIFEX_OPT_URL = "https://www.taifex.com.tw/cht/3/callsAndPutsDateDown"
 TAIFEX_OPT_LARGE_URL = "https://www.taifex.com.tw/cht/3/largeTraderOptDown"
 DIV_URL = "https://www.twse.com.tw/rwd/zh/exRight/TWT49U?startDate={a}&endDate={b}&response=json"
@@ -445,7 +445,7 @@ def first_num(s):
     return num(m.group(0)) if m else None
 
 
-def update_futures(today):
+def update_futures(today, last_trade=None):
     """期交所：三大法人台指期／小台／微台淨未平倉、大額交易人、VIX、臺指選擇權籌碼。"""
     path = os.path.join(DATA, "futures.json")
     KEYS = ("inst", "large", "vix", "opt", "optl")
@@ -457,12 +457,16 @@ def update_futures(today):
             fut[k] = old.get(k + "_map", {})
     start = today - dt.timedelta(days=180)
     # 只補最近 10 天＋缺的區段（以 30 天為一段查詢）
+    # 期交所只給已公布的日期：查詢結束日用「最近一個有收盤資料的交易日」，
+    # 避免排程延遲到隔天時，查詢到還沒有資料的日子而整段查不到。
+    end_day = min(today, last_trade) if last_trade else today
+
     def chunks(have_dates):
         last = max(have_dates) if have_dates else None
         s0 = start if not last else max(start, dt.date.fromisoformat(last) - dt.timedelta(days=10))
         cur = s0
-        while cur <= today:
-            e = min(today, cur + dt.timedelta(days=29))
+        while cur <= end_day:
+            e = min(end_day, cur + dt.timedelta(days=29))
             yield cur, e
             cur = e + dt.timedelta(days=1)
     for cid in ("TXF", "MXF", "TMF"):
@@ -515,12 +519,28 @@ def update_futures(today):
         for iso, (_, v) in best.items():
             lm[iso] = [v[0] - v[1], v[2] - v[3], v[4]]
     print(f"大額交易人：{len(lm)} 天", flush=True)
-    txt = get_raw(TAIFEX_VIX_URL)
-    if txt:
-        plain = re.sub(r"<[^>]+>", " ", txt)
-        for dd, v in re.findall(r"(\d{4}/\d{1,2}/\d{1,2})\s+(\d{1,3}\.\d+)", plain):
-            y, mo, da = dd.split("/")
-            fut["vix"][f"{y}-{int(mo):02d}-{int(da):02d}"] = float(v)
+    # VIX：期交所每月一個文字檔（當月＋前 3 個月），每列：日期、時間、收盤值…
+    ym_list, y, m = [], today.year, today.month
+    for _ in range(4):
+        ym_list.append(f"{y:04d}{m:02d}")
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    for ym in ym_list:
+        txt = get_raw(TAIFEX_VIX_URL.format(ym=ym))
+        time.sleep(PAUSE)
+        if not txt or "<html" in txt.lower():
+            continue
+        for line in txt.splitlines():
+            parts = [x.strip() for x in re.split(r"[\t,]+", line.strip()) if x.strip()]
+            if len(parts) < 2:
+                continue
+            dm = re.match(r"^(\d{4})[/-]?(\d{2})[/-]?(\d{2})$", parts[0])
+            if not dm:
+                continue
+            nums = [first_num(x) for x in parts[1:] if re.match(r"^-?\d+\.\d+$", x)]
+            if nums and 3 < nums[0] < 200:
+                fut["vix"][f"{dm.group(1)}-{dm.group(2)}-{dm.group(3)}"] = nums[0]
     print(f"VIX：{len(fut['vix'])} 天", flush=True)
 
     def col(h, *keys, default=-1):
@@ -817,7 +837,8 @@ def main():
     rebuild()
     closes = update_taiex(today)
     build_market(closes)
-    for step in (lambda: build_contrib(closes, update_shares()), lambda: update_futures(today),
+    last_trade = dt.date.fromisoformat(max(closes)) if closes else None
+    for step in (lambda: build_contrib(closes, update_shares()), lambda: update_futures(today, last_trade),
                  lambda: update_monthly(sorted(closes), today)):
         try:
             step()
