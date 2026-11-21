@@ -45,10 +45,14 @@ STOCK_RE = re.compile(r"^[1-9]\d{3}$")   # 指數成分：一般股票，不含 
 HIST_START = (2000, 1)
 
 
-def get_json(url):
-    for attempt in range(4):
+def get_json(url, tries=4):
+    for attempt in range(tries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+            hd = {"User-Agent": UA, "Accept": "application/json"}
+            if "tpex.org.tw" in url:
+                hd["User-Agent"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+                hd["Referer"] = "https://www.tpex.org.tw/zh-tw/mainboard/trading/info/pricing.html"
+            req = urllib.request.Request(url, headers=hd)
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.loads(r.read().decode("utf-8"))
         except Exception as e:  # 網路錯誤就等一下再試
@@ -189,19 +193,152 @@ def parse_margin(j, prices):
     return {"r": round(val / (amt * 1000) * 100, 2), "amt": amt, "n": n}
 
 
+# ---------------- 櫃買中心（上櫃） ----------------
+TPEX = "https://www.tpex.org.tw"
+TPEX_QUOTE_URLS = [
+    TPEX + "/www/zh-tw/afterTrading/dailyQuotes?date={w}&type=EW&id=&response=json",
+    TPEX + "/www/zh-tw/afterTrading/otc?date={w}&type=EW&id=&response=json",
+    TPEX + "/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&d={r}&se=EW&o=json",
+]
+TPEX_INST_URLS = [
+    TPEX + "/www/zh-tw/insti/dailyTrade?type=Daily&sect=EW&date={w}&id=&response=json",
+]
+TPEX_EXR_URLS = [
+    TPEX + "/www/zh-tw/bulletin/exDailyQ?startDate={wa}&endDate={wb}&id=&response=json",
+    TPEX + "/web/stock/exright/dailyquo/exDailyQ_result.php?l=zh-tw&d={ra}&ed={rb}&o=json",
+]
+OTC = {"fail": 0, "pref": {}}   # 連續失敗 3 次就停用到這次執行結束，避免拖垮上市資料
+
+
+def roc(day):
+    return f"{day.year - 1911}/{day.month:02d}/{day.day:02d}"
+
+
+def otc_ok():
+    return OTC["fail"] < 3
+
+
+def tpex_rows(j, legacy_fields):
+    """回傳 [(欄位, 列)]，相容新版（tables／fields+data）和舊版（aaData）。"""
+    out = []
+    if not isinstance(j, dict):
+        return out
+    for fields, data in tables(j):
+        out.append(([clean(x) for x in fields], data))
+    if isinstance(j.get("fields"), list) and isinstance(j.get("data"), list) and j["data"]:
+        out.append(([clean(x) for x in j["fields"]], j["data"]))
+    if isinstance(j.get("aaData"), list) and j["aaData"] and legacy_fields:
+        out.append((legacy_fields, j["aaData"]))
+    return out
+
+
+def get_tpex(kind, urls, legacy, parse, **fmt):
+    if not otc_ok():
+        return None
+    order = sorted(range(len(urls)), key=lambda i: 0 if OTC["pref"].get(kind) == i else 1)
+    for i in order:
+        j = get_json(urls[i].format(**fmt), tries=2)
+        time.sleep(PAUSE)
+        res = parse(tpex_rows(j, legacy)) if j else None
+        if res:
+            OTC["pref"][kind], OTC["fail"] = i, 0
+            return res
+    OTC["fail"] += 1
+    if not otc_ok():
+        print("  櫃買中心連續讀不到資料，這次先跳過上櫃", flush=True)
+    return None
+
+
+QUOTE_LEGACY = ["代號", "名稱", "收盤", "漲跌", "開盤", "最高", "最低", "均價", "成交股數", "成交金額(元)", "成交筆數"]
+
+
+def fidx(f, *keys, exact=None, avoid=()):
+    for i, x in enumerate(f):
+        if exact and x == exact:
+            return i
+    for i, x in enumerate(f):
+        if all(k in x for k in keys) and not any(a in x for a in avoid):
+            return i
+    return -1
+
+
+def parse_tpex_quotes(rows):
+    """上櫃收盤行情 → {代號: [收盤, 名稱, 漲跌, 開, 高, 低, 成交張數, 成交金額]}"""
+    res = {}
+    for f, data in rows:
+        ic, inm = fidx(f, "代號"), fidx(f, "名稱")
+        ip = f.index("收盤") if "收盤" in f else fidx(f, "收盤", avoid=("均", "前"))
+        if ic < 0 or ip < 0:
+            continue
+        ich = f.index("漲跌") if "漲跌" in f else fidx(f, "漲跌", avoid=("幅", "%"))
+        io_, ih, il = fidx(f, "開盤"), fidx(f, "最高"), fidx(f, "最低")
+        iv, ival = fidx(f, "成交股數"), fidx(f, "成交金額")
+        for row in data:
+            if len(row) <= max(ic, ip):
+                continue
+            code = clean(row[ic])
+            close = num(clean(row[ip]))
+            if not CODE_RE.match(code) or not close or close <= 0:
+                continue
+            def g(i):
+                return num(clean(row[i])) if 0 <= i < len(row) else None
+            chg = first_num(clean(row[ich])) if 0 <= ich < len(row) else None
+            vol = g(iv)
+            res[code] = [close, clean(row[inm]) if inm >= 0 else code, chg, g(io_) or close, g(ih) or close, g(il) or close,
+                         round((vol or 0) / 1000), g(ival) or 0]
+        if res:
+            break
+    return res
+
+
+def parse_tpex_inst(rows):
+    """上櫃三大法人 → {代號: [外資, 投信, 自營商, 合計]}（股數）"""
+    res = {}
+    for f, data in rows:
+        ic = fidx(f, "代號")
+        i_tot = fidx(f, "三大法人", "買賣超")
+        if ic < 0 or i_tot < 0:
+            continue
+        i_f = fidx(f, "外資", "買賣超", avoid=("不含", "自營商"))
+        i_f1, i_f2 = fidx(f, "外資", "不含", "買賣超"), fidx(f, "外資自營商", "買賣超")
+        i_t = fidx(f, "投信", "買賣超")
+        i_d = fidx(f, "自營商", "買賣超", avoid=("外資", "自行", "避險"))
+        i_d1, i_d2 = fidx(f, "自營商", "自行", "買賣超"), fidx(f, "自營商", "避險", "買賣超")
+        for row in data:
+            code = clean(row[ic]) if ic < len(row) else ""
+            if not CODE_RE.match(code):
+                continue
+            def v(i):
+                return int(num(clean(row[i])) or 0) if 0 <= i < len(row) else 0
+            fo = v(i_f) if i_f >= 0 else v(i_f1) + v(i_f2)
+            de = v(i_d) if i_d >= 0 else v(i_d1) + v(i_d2)
+            res[code] = [fo, v(i_t), de, v(i_tot)]
+        if res:
+            break
+    return res
+
+
 def has_ohlc(prices):
     return bool(prices) and len(next(iter(prices.values()))) >= 7
 
 
 def fetch_day(day, full=True):
-    """回傳 True 表示這天是交易日且已存檔。full=False 只補開高低收（K 線用的較舊日子）。"""
+    """回傳 True 表示這天是交易日且已存檔。full=False 只補開高低收（K 線用的較舊日子）。
+    p／i／m＝上市收盤、法人、融資；po／io＝上櫃收盤、法人。"""
     old = load_raw(day) or {}
-    if has_ohlc(old.get("p")) and (not full or (old.get("i") and old.get("m"))):
+    need_p = not has_ohlc(old.get("p"))
+    need_i = full and not old.get("i")
+    need_m = full and not old.get("m")
+    need_po = otc_ok() and not has_ohlc(old.get("po"))
+    need_io = otc_ok() and full and not old.get("io")
+    if not (need_p or need_i or need_m or need_po or need_io):
         return True
+    if not old and day.weekday() >= 5:
+        return False
     d = day.strftime("%Y%m%d")
     print(f"抓取 {day}", flush=True)
-    prices = old.get("p") if has_ohlc(old.get("p")) else None
-    if not prices:
+    prices = None if need_p else old["p"]
+    if need_p:
         pj = get_json(PRICE_URL.format(d=d))
         time.sleep(PAUSE)
         if not pj or pj.get("stat") != "OK":
@@ -212,23 +349,31 @@ def fetch_day(day, full=True):
             print("  收盤資料格式看不懂，略過", flush=True)
             return False
     inst = old.get("i") or {}
-    if not inst and full:
+    if need_i:
         ij = get_json(INST_URL.format(d=d))
         time.sleep(PAUSE)
         inst = parse_inst(ij) if ij and ij.get("stat") == "OK" else {}
         if not inst:
             print("  三大法人尚未公布", flush=True)
     margin = old.get("m")
-    if not margin and full:
+    if need_m:
         mj = get_json(MARGIN_URL.format(d=d))
         time.sleep(PAUSE)
         margin = parse_margin(mj, prices) if mj and mj.get("stat") == "OK" else None
         if not margin:
             print("  融資資料尚未公布", flush=True)
+    po = old.get("po") or {}
+    if need_po:
+        r = get_tpex("quote", TPEX_QUOTE_URLS, QUOTE_LEGACY, parse_tpex_quotes, w=day.strftime("%Y/%m/%d"), r=roc(day))
+        if r:
+            po = {c: v[:7] for c, v in r.items()}
+    io = old.get("io") or {}
+    if need_io:
+        io = get_tpex("inst", TPEX_INST_URLS, None, parse_tpex_inst, w=day.strftime("%Y/%m/%d"), r=roc(day)) or {}
     os.makedirs(RAW, exist_ok=True)
     with open(raw_path(day), "w", encoding="utf-8") as fh:
-        json.dump({"date": day.isoformat(), "p": prices, "i": inst, "m": margin}, fh, ensure_ascii=False, separators=(",", ":"))
-    print(f"  完成：{len(prices)} 檔收盤價，{len(inst)} 檔法人，維持率 {margin['r'] if margin else '—'}", flush=True)
+        json.dump({"date": day.isoformat(), "p": prices, "i": inst, "m": margin, "po": po, "io": io}, fh, ensure_ascii=False, separators=(",", ":"))
+    print(f"  完成：上市 {len(prices)} 檔、上櫃 {len(po)} 檔收盤價，法人 {len(inst)}＋{len(io)} 檔，維持率 {margin['r'] if margin else '—'}", flush=True)
     return True
 
 
@@ -672,22 +817,33 @@ def update_monthly(taiex_rows, today):
         ym = d[:7]
         if ym >= MONTHLY_START and ym < today.strftime("%Y-%m"):
             ends[ym] = max(ends.get(ym, d), d)
-    todo = [ym for ym in sorted(ends) if ym not in raw or raw[ym].get("d") != ends[ym]]
+    todo = [ym for ym in sorted(ends) if ym not in raw or raw[ym].get("d") != ends[ym] or (otc_ok() and not raw[ym].get("otc"))]
     print(f"月底資料：要抓 {len(todo)} 個月", flush=True)
     for ym in todo:
         d = ends[ym]
-        j = get_json(PRICE_URL.format(d=d.replace("-", "")))
-        time.sleep(PAUSE)
-        if not j or j.get("stat") != "OK":
-            continue
-        pv = parse_prices_value(j)
-        if not pv:
-            continue
+        if ym in raw and raw[ym].get("d") == d:
+            pv = dict(raw[ym]["p"])          # 上市已經有了，只補上櫃
+        else:
+            j = get_json(PRICE_URL.format(d=d.replace("-", "")))
+            time.sleep(PAUSE)
+            if not j or j.get("stat") != "OK":
+                continue
+            pv = parse_prices_value(j)
+            if not pv:
+                continue
+        got_otc = False
+        if otc_ok():
+            day = dt.date.fromisoformat(d)
+            r = get_tpex("quote", TPEX_QUOTE_URLS, QUOTE_LEGACY, parse_tpex_quotes, w=day.strftime("%Y/%m/%d"), r=roc(day))
+            if r:
+                got_otc = True
+                for c, v in r.items():
+                    pv.setdefault(c, [v[0], v[7], v[1]])
         # 只留成交金額前 250 名和 ETF 0050，控制檔案大小
-        keep = sorted((c for c in pv if not c.startswith("00")), key=lambda c: -(pv[c][1] or 0))[:250]
+        keep = sorted((c for c in pv if not c.startswith("00")), key=lambda c: -(pv[c][1] or 0))[:300]
         if "0050" in pv:
             keep.append("0050")
-        raw[ym] = {"d": d, "p": {c: pv[c] for c in keep}}
+        raw[ym] = {"d": d, "p": {c: pv[c] for c in keep}, "otc": got_otc or raw.get(ym, {}).get("otc", False)}
         with open(raw_path_, "w", encoding="utf-8") as fh:
             json.dump(raw, fh, ensure_ascii=False, separators=(",", ":"))
     # 除權息還原因子：除權息前收盤價 ÷ 除權息參考價
@@ -722,6 +878,36 @@ def update_monthly(taiex_rows, today):
                 ev.append([iso, clean(row[ic]), round(b / r, 6)])
         divs[ys] = ev
         print(f"除權息 {y}：{len(ev)} 筆", flush=True)
+    # 上櫃除權息（欄位名稱和上市類似）
+    for y in range(y0, today.year + 1):
+        ys = f"{y}o"
+        if ys in divs and y < today.year - 1:
+            continue
+        a_, b_ = dt.date(y, 1, 1), dt.date(y, 12, 31)
+
+        def parse_exr(rows):
+            ev = []
+            for f, data in rows:
+                idd, ic = fidx(f, "日期"), fidx(f, "代號")
+                ib, ir = fidx(f, "前收盤"), fidx(f, "參考價", avoid=("漲", "跌", "開盤"))
+                if min(idd, ic, ib, ir) < 0:
+                    continue
+                for row in data:
+                    ds = clean(row[idd])
+                    m = re.match(r"^(\d{2,4})[/年-]?(\d{1,2})[/月-]?(\d{1,2})", ds)
+                    if not m:
+                        continue
+                    yy = int(m.group(1)); yy = yy + 1911 if yy < 1000 else yy
+                    b, r = num(clean(row[ib])), num(clean(row[ir]))
+                    if b and r and 1 < b / r < 3:
+                        ev.append([f"{yy:04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}", clean(row[ic]), round(b / r, 6)])
+                if ev:
+                    break
+            return ev
+        ev = get_tpex("exr", TPEX_EXR_URLS, None, parse_exr, wa=a_.strftime("%Y/%m/%d"), wb=b_.strftime("%Y/%m/%d"), ra=roc(a_), rb=roc(b_))
+        if ev:
+            divs[ys] = ev
+            print(f"上櫃除權息 {y}：{len(ev)} 筆", flush=True)
     with open(div_path, "w", encoding="utf-8") as fh:
         json.dump(divs, fh, ensure_ascii=False, separators=(",", ":"))
     factors = {}
@@ -797,17 +983,18 @@ def rebuild():
         with open(os.path.join(RAW, fn), encoding="utf-8") as fh:
             day = json.load(fh)
         d = day["date"]
-        for code, v in day["p"].items():
+        allp = [(c, v, "上市") for c, v in day["p"].items()] + [(c, v, "上櫃") for c, v in (day.get("po") or {}).items()]
+        for code, v, mk in allp:
             close, name = v[0], v[1]
             s = stocks.setdefault(code, {"code": code, "name": name, "p": [], "i": [], "k": [], "_ref": []})
-            s["name"] = name
+            s["name"], s["mk"] = name, mk
             if d >= sig_from:
                 s["p"].append([d, close])
             if len(v) >= 7:
                 s["k"].append([d, v[3], v[4], v[5], close, v[6]])
                 s["_ref"].append(close - v[2] if v[2] is not None else None)
         if d >= sig_from:
-            for code, vals in day.get("i", {}).items():
+            for code, vals in list(day.get("i", {}).items()) + list((day.get("io") or {}).items()):
                 s = stocks.setdefault(code, {"code": code, "name": code, "p": [], "i": [], "k": [], "_ref": []})
                 s["i"].append([d] + vals)
     for s in stocks.values():
@@ -841,11 +1028,12 @@ def rebuild():
         "last_date": files[-1][:10] if files else None,
         "days": len(sig_files),
         "kline_from": files[0][:10] if files else None,
-        "stocks": sorted([c, s["name"]] for c, s in stocks.items()),
+        "stocks": sorted([c, s["name"], s.get("mk", "上市")] for c, s in stocks.items()),
     }
     with open(os.path.join(DATA, "index.json"), "w", encoding="utf-8") as fh:
         json.dump(index, fh, ensure_ascii=False, separators=(",", ":"))
-    print(f"整理完成：{len(stocks)} 檔股票，{len(files)} 個交易日（K 線）", flush=True)
+    n_otc = sum(1 for s in stocks.values() if s.get("mk") == "上櫃")
+    print(f"整理完成：{len(stocks)} 檔（上櫃 {n_otc} 檔），{len(files)} 個交易日（K 線）", flush=True)
 
 
 def main():
