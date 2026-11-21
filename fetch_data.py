@@ -20,7 +20,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(ROOT, "data")
 RAW = os.path.join(DATA, "raw")
 STK = os.path.join(DATA, "stocks")
-KEEP_DAYS = 130          # 保留幾個交易日
+KEEP_DAYS = 500          # 保留幾個交易日（K 線用約 2 年）
+SIGNAL_DAYS = 130        # 訊號、法人資料保留天數
 PAUSE = 3.5              # 每次查詢間隔秒數，避免被證交所擋
 TPE = dt.timezone(dt.timedelta(hours=8))
 UA = "Mozilla/5.0 (personal stock app; GitHub Actions)"
@@ -91,6 +92,8 @@ def parse_prices(j):
         ic, inm, ip = f.index("證券代號"), f.index("證券名稱"), f.index("收盤價")
         isg = f.index("漲跌(+/-)") if "漲跌(+/-)" in f else -1
         idf = f.index("漲跌價差") if "漲跌價差" in f else -1
+        io_, ih, il = (f.index(k) if k in f else -1 for k in ("開盤價", "最高價", "最低價"))
+        iv = f.index("成交股數") if "成交股數" in f else -1
         for row in data:
             code = clean(row[ic])
             close = num(clean(row[ip]))
@@ -100,7 +103,11 @@ def parse_prices(j):
                     sg, df = clean(row[isg]), num(clean(row[idf]))
                     if df is not None and sg in ("+", "-", ""):
                         chg = -df if sg == "-" else df
-                res[code] = [close, clean(row[inm]), chg]
+                o = num(clean(row[io_])) if io_ >= 0 else None
+                h = num(clean(row[ih])) if ih >= 0 else None
+                l_ = num(clean(row[il])) if il >= 0 else None
+                vol = num(clean(row[iv])) if iv >= 0 else None
+                res[code] = [close, clean(row[inm]), chg, o or close, h or close, l_ or close, round((vol or 0) / 1000)]
     return res
 
 
@@ -182,14 +189,18 @@ def parse_margin(j, prices):
     return {"r": round(val / (amt * 1000) * 100, 2), "amt": amt, "n": n}
 
 
-def fetch_day(day):
-    """回傳 True 表示這天是交易日且已存檔。"""
+def has_ohlc(prices):
+    return bool(prices) and len(next(iter(prices.values()))) >= 7
+
+
+def fetch_day(day, full=True):
+    """回傳 True 表示這天是交易日且已存檔。full=False 只補開高低收（K 線用的較舊日子）。"""
     old = load_raw(day) or {}
-    if old.get("i") and old.get("m"):
+    if has_ohlc(old.get("p")) and (not full or (old.get("i") and old.get("m"))):
         return True
     d = day.strftime("%Y%m%d")
     print(f"抓取 {day}", flush=True)
-    prices = old.get("p")
+    prices = old.get("p") if has_ohlc(old.get("p")) else None
     if not prices:
         pj = get_json(PRICE_URL.format(d=d))
         time.sleep(PAUSE)
@@ -201,14 +212,14 @@ def fetch_day(day):
             print("  收盤資料格式看不懂，略過", flush=True)
             return False
     inst = old.get("i") or {}
-    if not inst:
+    if not inst and full:
         ij = get_json(INST_URL.format(d=d))
         time.sleep(PAUSE)
         inst = parse_inst(ij) if ij and ij.get("stat") == "OK" else {}
         if not inst:
             print("  三大法人尚未公布", flush=True)
     margin = old.get("m")
-    if not margin:
+    if not margin and full:
         mj = get_json(MARGIN_URL.format(d=d))
         time.sleep(PAUSE)
         margin = parse_margin(mj, prices) if mj and mj.get("stat") == "OK" else None
@@ -775,10 +786,12 @@ def update_monthly(taiex_rows, today):
 
 
 def rebuild():
+    """整理每檔股票的檔案：p＝收盤（訊號用）、i＝三大法人、k＝日 K（開高低收量，已還原分割）。"""
     files = sorted(f for f in os.listdir(RAW) if f.endswith(".json")) if os.path.isdir(RAW) else []
     for old in files[:-KEEP_DAYS]:
         os.remove(os.path.join(RAW, old))
     files = files[-KEEP_DAYS:]
+    sig_from = files[-SIGNAL_DAYS][:10] if len(files) >= SIGNAL_DAYS else ""
     stocks = {}
     for fn in files:
         with open(os.path.join(RAW, fn), encoding="utf-8") as fh:
@@ -786,12 +799,34 @@ def rebuild():
         d = day["date"]
         for code, v in day["p"].items():
             close, name = v[0], v[1]
-            s = stocks.setdefault(code, {"code": code, "name": name, "p": [], "i": []})
+            s = stocks.setdefault(code, {"code": code, "name": name, "p": [], "i": [], "k": [], "_ref": []})
             s["name"] = name
-            s["p"].append([d, close])
-        for code, vals in day.get("i", {}).items():
-            s = stocks.setdefault(code, {"code": code, "name": code, "p": [], "i": []})
-            s["i"].append([d] + vals)
+            if d >= sig_from:
+                s["p"].append([d, close])
+            if len(v) >= 7:
+                s["k"].append([d, v[3], v[4], v[5], close, v[6]])
+                s["_ref"].append(close - v[2] if v[2] is not None else None)
+        if d >= sig_from:
+            for code, vals in day.get("i", {}).items():
+                s = stocks.setdefault(code, {"code": code, "name": code, "p": [], "i": [], "k": [], "_ref": []})
+                s["i"].append([d] + vals)
+    for s in stocks.values():
+        k, ref = s["k"], s.pop("_ref")
+        # 分割（例如 1 拆 4）或減資：用當天參考價和前一天收盤比較，把之前的 K 棒換算到現在的股數
+        splits = {}
+        for j in range(1, len(k)):
+            r = ref[j]
+            if r and r > 0:
+                ratio = k[j - 1][4] / r
+                if ratio > 1.8 or ratio < 0.55:
+                    splits[j] = ratio
+        cum = 1.0
+        for j in range(len(k) - 1, -1, -1):
+            if cum != 1.0:
+                b = k[j]
+                k[j] = [b[0], round(b[1] / cum, 2), round(b[2] / cum, 2), round(b[3] / cum, 2), round(b[4] / cum, 2), round(b[5] * cum)]
+            if j in splits:
+                cum *= splits[j]
     os.makedirs(STK, exist_ok=True)
     for fn in os.listdir(STK):
         if fn[:-5] not in stocks:
@@ -799,21 +834,24 @@ def rebuild():
     for code, s in stocks.items():
         with open(os.path.join(STK, code + ".json"), "w", encoding="utf-8") as fh:
             json.dump(s, fh, ensure_ascii=False, separators=(",", ":"))
+    sig_files = files[-SIGNAL_DAYS:]
     index = {
         "updated": dt.datetime.now(TPE).strftime("%Y-%m-%d %H:%M"),
-        "first_date": files[0][:10] if files else None,
+        "first_date": sig_files[0][:10] if sig_files else None,
         "last_date": files[-1][:10] if files else None,
-        "days": len(files),
+        "days": len(sig_files),
+        "kline_from": files[0][:10] if files else None,
         "stocks": sorted([c, s["name"]] for c, s in stocks.items()),
     }
     with open(os.path.join(DATA, "index.json"), "w", encoding="utf-8") as fh:
         json.dump(index, fh, ensure_ascii=False, separators=(",", ":"))
-    print(f"整理完成：{len(stocks)} 檔股票，{len(files)} 個交易日", flush=True)
+    print(f"整理完成：{len(stocks)} 檔股票，{len(files)} 個交易日（K 線）", flush=True)
 
 
 def main():
     os.makedirs(DATA, exist_ok=True)
     if "--intraday" in sys.argv:
+        rebuild()   # 個股檔不進 git，每次部署前都要重新產生
         intraday()
         return
     backfill = 0
@@ -826,7 +864,8 @@ def main():
     if backfill > 0:
         have, day, limit = 0, today, today - dt.timedelta(days=int(backfill * 1.6) + 20)
         while have < backfill and day >= limit:
-            if day.weekday() < 5 and fetch_day(day):
+            # 最近 130 個交易日抓完整資料，更早的只補 K 線用的開高低收
+            if day.weekday() < 5 and fetch_day(day, full=have < SIGNAL_DAYS):
                 have += 1
             day -= dt.timedelta(days=1)
     else:
