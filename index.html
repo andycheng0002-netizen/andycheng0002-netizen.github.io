@@ -262,7 +262,13 @@ nav.tabs a { font-size: 11px; }
 .kbar button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 .kbar.ind button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
 .kchart { flex: 1; min-height: 0; margin: 6px 0 0; position: relative; }
-.kchart #tvChart { position: absolute; inset: 0; }
+.kchart canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+.kbar button.soon { opacity: .45; }
+.kinfo { font-family: var(--font-num); font-size: 11.5px; line-height: 1.45; padding: 2px max(12px, env(safe-area-inset-left, 0px)); min-height: 2.9em; color: var(--muted); }
+.kinfo b { color: var(--fg); font-weight: 500; }
+.kctl { display: flex; align-items: center; gap: 10px; padding: 6px max(12px, env(safe-area-inset-left, 0px)) 0; }
+.kctl button { flex: none; width: 36px; height: 32px; padding: 0; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); color: var(--fg); font-size: 18px; }
+.kctl input { flex: 1; min-width: 0; accent-color: var(--accent); }
 .knote { font-size: 11.5px; color: var(--muted); padding: 6px max(12px, env(safe-area-inset-left, 0px)); }
 .knote a { color: var(--accent); }
 
@@ -591,13 +597,19 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
 <div class="ksheet" id="kSheet" hidden role="dialog" aria-modal="true" aria-labelledby="kTitle">
   <div class="kh"><h2 id="kTitle">K 線</h2><button type="button" id="kClose">關閉</button></div>
   <div class="kbar" id="kIntv" aria-label="K 線週期">
-    <button type="button" data-i="1">1分</button><button type="button" data-i="5">5分</button><button type="button" data-i="15">15分</button><button type="button" data-i="30">30分</button><button type="button" data-i="60">60分</button><button type="button" data-i="D" aria-pressed="true">日線</button><button type="button" data-i="W">週線</button><button type="button" data-i="M">月線</button>
+    <button type="button" data-i="1" class="soon">1分</button><button type="button" data-i="5" class="soon">5分</button><button type="button" data-i="15" class="soon">15分</button><button type="button" data-i="30" class="soon">30分</button><button type="button" data-i="60" class="soon">60分</button><button type="button" data-i="D" aria-pressed="true">日線</button><button type="button" data-i="W">週線</button><button type="button" data-i="M">月線</button>
   </div>
   <div class="kbar ind" id="kInd" aria-label="技術指標">
-    <button type="button" data-s="Volume@tv-basicstudies" aria-pressed="true">Vol</button><button type="button" data-s="MACD@tv-basicstudies" aria-pressed="true">MACD</button><button type="button" data-s="WilliamR@tv-basicstudies" aria-pressed="true">威廉</button><button type="button" data-s="DM@tv-basicstudies" aria-pressed="true">DMI</button><button type="button" data-s="Stochastic@tv-basicstudies" aria-pressed="true">KD</button><button type="button" data-s="RSI@tv-basicstudies" aria-pressed="true">RSI</button>
+    <button type="button" data-s="vol" aria-pressed="true">Vol</button><button type="button" data-s="macd" aria-pressed="true">MACD</button><button type="button" data-s="wr" aria-pressed="true">威廉</button><button type="button" data-s="dmi" aria-pressed="true">DMI</button><button type="button" data-s="kd" aria-pressed="true">KD</button><button type="button" data-s="rsi" aria-pressed="true">RSI</button>
   </div>
-  <div class="kchart"><div id="tvChart"></div></div>
-  <div class="knote">圖表與資料由 TradingView 提供，台股報價可能有延遲；指標太多擠不下時，點上面的指標按鈕關掉幾個。看不到圖？<a id="kExt" href="https://www.tradingview.com/" target="_blank" rel="noopener">在 TradingView 開啟</a></div>
+  <div class="kinfo" id="kInfo"></div>
+  <div class="kchart" id="kBox"><canvas id="kCanvas"></canvas></div>
+  <div class="kctl">
+    <button type="button" id="kZoomOut" aria-label="顯示更多 K 棒">－</button>
+    <input type="range" id="kPan" min="0" max="0" value="0" aria-label="往前後移動">
+    <button type="button" id="kZoomIn" aria-label="放大">＋</button>
+  </div>
+  <div class="knote" id="kNote"></div>
 </div>
 
 <nav class="tabs" aria-label="功能">
@@ -648,11 +660,13 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       if (wd !== 0 && wd !== 6) days.unshift(d.toISOString().slice(0, 10));
       d = new Date(d.getTime() - 86400000);
     }
-    var px = 100, pr = [], ir = [];
+    var px = 100, pr = [], ir = [], kk = [];
     days.forEach(function (day, i) {
       var r = 0.0012 + 0.017 * norm() + (i > 70 ? 0.002 : 0);
       px = Math.max(5, px * (1 + r));
+      var o_ = px / (1 + r), hi_ = Math.max(o_, px) * (1 + Math.abs(norm()) * 0.006), lo_ = Math.min(o_, px) * (1 - Math.abs(norm()) * 0.006);
       pr.push({ d: day, c: Math.round(px * 100) / 100 });
+      kk.push([day, +o_.toFixed(2), +hi_.toFixed(2), +lo_.toFixed(2), +px.toFixed(2), Math.round(8000 + 3000 * rnd())]);
       if (i >= 60) {
         var f = Math.round((r * 9e7 + 1.5e6 * norm()) / 1000) * 1000;
         var t = Math.round((2e5 + 4e5 * norm()) / 1000) * 1000;
@@ -660,7 +674,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
         ir.push({ d: day, f: f, t: t, dl: dl, tot: f + t + dl });
       }
     });
-    return { code: "0000", name: "範例股（模擬）", pr: pr, ir: ir };
+    return { code: "0000", name: "範例股（模擬）", pr: pr, ir: ir, k: kk };
   }
   function loadIndex() {
     return fetch("data/index.json?t=" + Date.now(), { cache: "no-store" })
@@ -678,7 +692,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       .then(function (r) { if (!r.ok) throw new Error("讀不到 " + code + " 的資料，請稍後再試。"); return r.json(); })
       .then(function (j) {
         var s = {
-          code: j.code, name: j.name,
+          code: j.code, name: j.name, k: j.k || [],
           pr: j.p.map(function (x) { return { d: x[0], c: x[1] }; }),
           ir: j.i.map(function (x) { return { d: x[0], f: x[1], t: x[2], dl: x[3], tot: x[4] }; })
         };
@@ -1804,63 +1818,193 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
     FU.n = +b.getAttribute("data-n"); renderFutures();
   });
 
-  /* ---------- K 線技術分析（TradingView） ---------- */
-  var KL = { iv: "D", studies: null, loaded: null };
-  try { KL.iv = LS.get("beat0050.kiv") || "D"; KL.studies = JSON.parse(LS.get("beat0050.kst") || "null"); } catch (e) {}
-  function tvLoad() {
-    if (KL.loaded) return KL.loaded;
-    KL.loaded = new Promise(function (res, rej) {
-      var sc = document.createElement("script");
-      sc.src = "https://s3.tradingview.com/tv.js"; sc.async = true;
-      sc.onload = function () { res(); }; sc.onerror = function () { KL.loaded = null; rej(); };
-      document.head.appendChild(sc);
+  /* ---------- K 線技術分析（自建圖表，證交所資料） ---------- */
+  var KL = { iv: "D", on: null, n: 0, end: 0, cur: -1, bars: [], ind: null };
+  try { KL.iv = LS.get("beat0050.kiv2") || "D"; KL.on = JSON.parse(LS.get("beat0050.kon") || "null"); } catch (e) {}
+  if (["D", "W", "M"].indexOf(KL.iv) < 0) KL.iv = "D";
+  var K_ALL = ["vol", "macd", "wr", "dmi", "kd", "rsi"];
+  if (!KL.on) KL.on = K_ALL.slice();
+
+  function aggBars(k, iv) {
+    if (iv === "D") return k.map(function (b) { return { d: b[0], o: b[1], h: b[2], l: b[3], c: b[4], v: b[5] }; });
+    var out = [], key = null, cur = null;
+    k.forEach(function (b) {
+      var dt0 = new Date(b[0] + "T00:00:00Z"), kk;
+      if (iv === "W") { var wd = (dt0.getUTCDay() + 6) % 7; kk = new Date(dt0.getTime() - wd * 86400000).toISOString().slice(0, 10); }
+      else kk = b[0].slice(0, 7);
+      if (kk !== key) { cur = { d: b[0], o: b[1], h: b[2], l: b[3], c: b[4], v: b[5] }; out.push(cur); key = kk; }
+      else { cur.h = Math.max(cur.h, b[2]); cur.l = Math.min(cur.l, b[3]); cur.c = b[4]; cur.v += b[5]; cur.d = b[0]; }
     });
-    return KL.loaded;
+    return out;
   }
-  function tvSymbol() { return "TWSE:" + (cur || "2330"); }
-  function kRender() {
-    var sym = tvSymbol();
+  function emaArr(a, n) { var k = 2 / (n + 1), o = [], e = null; a.forEach(function (v, i) { e = e === null ? v : v * k + e * (1 - k); o.push(i >= n - 1 ? e : null); }); return o; }
+  function maArr(a, n) { var o = [], s = 0; a.forEach(function (v, i) { s += v; if (i >= n) s -= a[i - n]; o.push(i >= n - 1 ? s / n : null); }); return o; }
+  function rma(a, n) { var o = [], e = null, s = 0; a.forEach(function (v, i) { if (i < n) { s += v; o.push(i === n - 1 ? (e = s / n) : null); } else { e = (e * (n - 1) + v) / n; o.push(e); } }); return o; }
+  function calcInd(B) {
+    var c = B.map(function (b) { return b.c; }), h = B.map(function (b) { return b.h; }), l = B.map(function (b) { return b.l; }), n = B.length;
+    var e12 = emaArr(c, 12), e26 = emaArr(c, 26);
+    var dif = c.map(function (_, i) { return e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null; });
+    var difv = dif.map(function (v) { return v == null ? 0 : v; }), first = dif.findIndex(function (v) { return v != null; });
+    var dea = emaArr(difv.slice(Math.max(0, first)), 9); dea = new Array(Math.max(0, first)).fill(null).concat(dea);
+    var osc = dif.map(function (v, i) { return v != null && dea[i] != null ? v - dea[i] : null; });
+    var wr = [], K = [], D = [], kv = 50, dv = 50;
+    for (var i = 0; i < n; i++) {
+      if (i >= 13) { var hh = Math.max.apply(null, h.slice(i - 13, i + 1)), ll = Math.min.apply(null, l.slice(i - 13, i + 1)); wr.push(hh > ll ? (hh - c[i]) / (hh - ll) * -100 : -50); } else wr.push(null);
+      if (i >= 8) { var h9 = Math.max.apply(null, h.slice(i - 8, i + 1)), l9 = Math.min.apply(null, l.slice(i - 8, i + 1)), rsv = h9 > l9 ? (c[i] - l9) / (h9 - l9) * 100 : 50; kv = kv * 2 / 3 + rsv / 3; dv = dv * 2 / 3 + kv / 3; K.push(kv); D.push(dv); } else { K.push(null); D.push(null); }
+    }
+    var tr = [0], pdm = [0], mdm = [0];
+    for (var j = 1; j < n; j++) {
+      tr.push(Math.max(h[j] - l[j], Math.abs(h[j] - c[j - 1]), Math.abs(l[j] - c[j - 1])));
+      var up = h[j] - h[j - 1], dn = l[j - 1] - l[j];
+      pdm.push(up > dn && up > 0 ? up : 0); mdm.push(dn > up && dn > 0 ? dn : 0);
+    }
+    var str = rma(tr, 14), sp = rma(pdm, 14), sm = rma(mdm, 14);
+    var pdi = str.map(function (t, i) { return t ? sp[i] / t * 100 : null; }), mdi = str.map(function (t, i) { return t ? sm[i] / t * 100 : null; });
+    var dx = pdi.map(function (p, i) { return p != null && mdi[i] != null && p + mdi[i] > 0 ? Math.abs(p - mdi[i]) / (p + mdi[i]) * 100 : 0; });
+    var fst = pdi.findIndex(function (v) { return v != null; });
+    var adx = new Array(Math.max(0, fst)).fill(null).concat(rma(dx.slice(Math.max(0, fst)), 14));
+    var g = [], ls = [];
+    for (var q = 1; q < n; q++) { var d = c[q] - c[q - 1]; g.push(d > 0 ? d : 0); ls.push(d < 0 ? -d : 0); }
+    var ag = [null].concat(rma(g, 14)), al = [null].concat(rma(ls, 14));
+    var rsi = ag.map(function (a, i) { return a == null || al[i] == null ? null : al[i] === 0 ? 100 : 100 - 100 / (1 + a / al[i]); });
+    return { ma5: maArr(c, 5), ma20: maArr(c, 20), ma60: maArr(c, 60), vma: maArr(B.map(function (b) { return b.v; }), 5), dif: dif, dea: dea, osc: osc, wr: wr, k: K, d: D, pdi: pdi, mdi: mdi, adx: adx, rsi: rsi };
+  }
+  function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+  var PANELS = {
+    vol: { t: "Vol（張）", series: function (I, B) { return []; } },
+    macd: { t: "MACD(12,26,9)" }, wr: { t: "威廉 W%R(14)", lv: [-20, -80], rg: [-100, 0] },
+    dmi: { t: "DMI(14)" }, kd: { t: "KD(9,3,3)", lv: [20, 80], rg: [0, 100] }, rsi: { t: "RSI(14)", lv: [30, 70], rg: [0, 100] }
+  };
+  function kDraw() {
+    var cv = $("kCanvas"), box = $("kBox"), W = box.clientWidth, H = box.clientHeight;
+    if (!W || !H) return;
+    var dpr = window.devicePixelRatio || 1; cv.width = W * dpr; cv.height = H * dpr;
+    var g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+    var B = KL.bars, I = KL.ind, n = B.length;
+    if (!n) { g.fillStyle = cssVar("--muted"); g.font = "14px sans-serif"; g.fillText("這檔還沒有 K 線資料", 16, 30); return; }
+    var col = { up: cssVar("--up"), dn: cssVar("--down"), fg: cssVar("--fg"), mu: cssVar("--muted"), ln: cssVar("--line"), ac: cssVar("--accent"), gd: cssVar("--gold"), cr: cssVar("--crit") };
+    var R = 50, PW = W - R - 4, N = Math.min(KL.n, n), end = Math.min(n, Math.max(N, KL.end)), st = end - N, bw = PW / N;
+    var on = K_ALL.filter(function (k) { return KL.on.indexOf(k) >= 0; });
+    var priceH = on.length ? Math.max(H * 0.36, H - on.length * 78) : H, ph = on.length ? (H - priceH) / on.length : 0;
+    var ci = KL.cur >= st && KL.cur < end ? KL.cur : end - 1;
+    function X(i) { return 4 + (i - st + 0.5) * bw; }
+    function grid(y0, h, lo, hi, fmtF, lv) {
+      g.strokeStyle = col.ln; g.lineWidth = 1; g.beginPath(); g.moveTo(0, y0 + h - 0.5); g.lineTo(W, y0 + h - 0.5); g.stroke();
+      g.fillStyle = col.mu; g.font = "10px " + cssVar("--font-num"); g.textAlign = "left";
+      [hi, lo].forEach(function (v, k) { g.fillText(fmtF(v), PW + 8, k ? y0 + h - 4 : y0 + 22); });
+      (lv || []).forEach(function (v) { var y = y0 + 14 + (h - 18) * (1 - (v - lo) / (hi - lo)); g.setLineDash([3, 3]); g.strokeStyle = col.mu; g.globalAlpha = .5; g.beginPath(); g.moveTo(4, y); g.lineTo(PW + 4, y); g.stroke(); g.setLineDash([]); g.globalAlpha = 1; });
+    }
+    function line(arr, y0, h, lo, hi, c, w) {
+      g.strokeStyle = c; g.lineWidth = w || 1.3; g.beginPath(); var on_ = false;
+      for (var i = st; i < end; i++) { var v = arr[i]; if (v == null) { on_ = false; continue; } var y = y0 + 14 + (h - 18) * (1 - (v - lo) / (hi - lo)); if (on_) g.lineTo(X(i), y); else { g.moveTo(X(i), y); on_ = true; } }
+      g.stroke();
+    }
+    function range(arrs, fixed) {
+      if (fixed) return fixed;
+      var lo = Infinity, hi = -Infinity;
+      arrs.forEach(function (a) { for (var i = st; i < end; i++) { var v = a[i]; if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; } } });
+      if (!isFinite(lo)) { lo = 0; hi = 1; } if (hi === lo) { hi += 1; lo -= 1; }
+      return [lo, hi];
+    }
+    function label(y0, parts) {
+      var x = 6; g.font = "11px " + cssVar("--font-num"); g.textAlign = "left";
+      parts.forEach(function (p) { g.fillStyle = p[1]; g.fillText(p[0], x, y0 + 11); x += g.measureText(p[0]).width + 8; });
+    }
+    function f2(v, d) { return v == null ? "—" : v.toFixed(d == null ? 2 : d); }
+    // price panel
+    var pr = range([B.map(function (b) { return b.h; }), B.map(function (b) { return b.l; })]);
+    var lo = pr[0], hi = pr[1], pad = (hi - lo) * 0.06; lo -= pad; hi += pad;
+    var py0 = 0, ph0 = priceH;
+    function PY(v) { return py0 + 14 + (ph0 - 18) * (1 - (v - lo) / (hi - lo)); }
+    grid(py0, ph0, lo, hi, function (v) { return v >= 1000 ? v.toFixed(0) : v.toFixed(v >= 100 ? 1 : 2); });
+    for (var i = st; i < end; i++) {
+      var b = B[i], upb = b.c >= b.o, c_ = upb ? col.up : col.dn;
+      g.strokeStyle = c_; g.fillStyle = c_; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(X(i), PY(b.h)); g.lineTo(X(i), PY(b.l)); g.stroke();
+      var yo = PY(b.o), yc = PY(b.c), bh = Math.max(1, Math.abs(yc - yo)), w = Math.max(1, bw * 0.7);
+      g.fillRect(X(i) - w / 2, Math.min(yo, yc), w, bh);
+    }
+    line(I.ma5, py0, ph0, lo, hi, col.gd, 1.1); line(I.ma20, py0, ph0, lo, hi, col.ac, 1.1); line(I.ma60, py0, ph0, lo, hi, col.cr, 1.1);
+    label(py0, [["MA5 " + f2(I.ma5[ci]), col.gd], ["MA20 " + f2(I.ma20[ci]), col.ac], ["MA60 " + f2(I.ma60[ci]), col.cr]]);
+    // indicator panels
+    on.forEach(function (key, idx) {
+      var y0 = priceH + idx * ph, h = ph;
+      if (key === "vol") {
+        var vr = range([B.map(function (b) { return b.v; })]); vr[0] = 0;
+        grid(y0, h, 0, vr[1], function (v) { return v >= 1e4 ? (v / 1e4).toFixed(1) + "萬" : v.toFixed(0); });
+        for (var i2 = st; i2 < end; i2++) { var bb = B[i2], y = y0 + 14 + (h - 18) * (1 - bb.v / vr[1]); g.fillStyle = bb.c >= bb.o ? col.up : col.dn; g.globalAlpha = .7; g.fillRect(X(i2) - Math.max(1, bw * 0.35), y, Math.max(1, bw * 0.7), y0 + h - 4 - y); g.globalAlpha = 1; }
+        line(I.vma, y0, h, 0, vr[1], col.gd, 1);
+        label(y0, [["Vol " + fmt(B[ci].v, 0) + " 張", col.fg], ["MA5 " + (I.vma[ci] == null ? "—" : fmt(I.vma[ci], 0)), col.gd]]);
+      } else if (key === "macd") {
+        var mr = range([I.dif, I.dea, I.osc]), m = Math.max(Math.abs(mr[0]), Math.abs(mr[1])); mr = [-m, m];
+        grid(y0, h, mr[0], mr[1], function (v) { return v.toFixed(2); }, [0]);
+        for (var i3 = st; i3 < end; i3++) { var o = I.osc[i3]; if (o == null) continue; var yz = y0 + 14 + (h - 18) * 0.5, yv = y0 + 14 + (h - 18) * (1 - (o - mr[0]) / (mr[1] - mr[0])); g.fillStyle = o >= 0 ? col.up : col.dn; g.globalAlpha = .7; g.fillRect(X(i3) - Math.max(1, bw * 0.3), Math.min(yz, yv), Math.max(1, bw * 0.6), Math.abs(yv - yz)); g.globalAlpha = 1; }
+        line(I.dif, y0, h, mr[0], mr[1], col.ac); line(I.dea, y0, h, mr[0], mr[1], col.gd);
+        label(y0, [["MACD(12,26,9)", col.mu], ["DIF " + f2(I.dif[ci]), col.ac], ["DEA " + f2(I.dea[ci]), col.gd], ["OSC " + f2(I.osc[ci]), (I.osc[ci] || 0) >= 0 ? col.up : col.dn]]);
+      } else if (key === "dmi") {
+        var dr = range([I.pdi, I.mdi, I.adx]); dr[0] = 0;
+        grid(y0, h, dr[0], dr[1], function (v) { return v.toFixed(0); });
+        line(I.pdi, y0, h, dr[0], dr[1], col.up); line(I.mdi, y0, h, dr[0], dr[1], col.dn); line(I.adx, y0, h, dr[0], dr[1], col.gd);
+        label(y0, [["DMI(14)", col.mu], ["+DI " + f2(I.pdi[ci], 1), col.up], ["−DI " + f2(I.mdi[ci], 1), col.dn], ["ADX " + f2(I.adx[ci], 1), col.gd]]);
+      } else {
+        var P = PANELS[key], rr = P.rg;
+        grid(y0, h, rr[0], rr[1], function (v) { return v.toFixed(0); }, P.lv);
+        if (key === "kd") { line(I.k, y0, h, rr[0], rr[1], col.ac); line(I.d, y0, h, rr[0], rr[1], col.gd); label(y0, [["KD(9,3,3)", col.mu], ["K " + f2(I.k[ci], 1), col.ac], ["D " + f2(I.d[ci], 1), col.gd]]); }
+        if (key === "wr") { line(I.wr, y0, h, rr[0], rr[1], col.ac); label(y0, [["威廉 W%R(14)", col.mu], [f2(I.wr[ci], 1), col.ac]]); }
+        if (key === "rsi") { line(I.rsi, y0, h, rr[0], rr[1], col.cr); label(y0, [["RSI(14)", col.mu], [f2(I.rsi[ci], 1), col.cr]]); }
+      }
+    });
+    // crosshair
+    g.strokeStyle = col.fg; g.globalAlpha = .35; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(X(ci), 0); g.lineTo(X(ci), H); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    var bc = B[ci], prev = ci > 0 ? B[ci - 1].c : bc.o, chg = bc.c - prev;
+    $("kInfo").innerHTML = "<b>" + bc.d.replace(/-/g, "/") + (KL.iv === "W" ? " 週" : KL.iv === "M" ? " 月" : "") + "</b>　開 <b>" + bc.o + "</b>　高 <b>" + bc.h + "</b>　低 <b>" + bc.l + "</b>　收 <b class=\"" + cls(chg) + "\">" + bc.c + "</b>　<span class=\"" + cls(chg) + "\">" + (chg >= 0 ? "+" : "") + chg.toFixed(2) + "（" + pct(chg / prev, 2, true) + "）</span>　量 <b>" + fmt(bc.v, 0) + "</b> 張";
+  }
+  function kSetup() {
+    var s = STOCKS[cur];
+    KL.bars = aggBars((s && s.k) || [], KL.iv);
+    KL.ind = calcInd(KL.bars);
+    var n = KL.bars.length;
+    KL.n = Math.min(n, KL.iv === "D" ? 90 : KL.iv === "W" ? 80 : 60);
+    KL.end = n; KL.cur = -1;
+    var pan = $("kPan"); pan.min = Math.min(n, KL.n); pan.max = n; pan.value = n;
     $("kTitle").textContent = (cur || "") + " " + (NAMES[cur] || "") + "　K 線";
-    $("kExt").href = "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(sym);
     document.querySelectorAll("#kIntv button").forEach(function (b) { b.setAttribute("aria-pressed", b.getAttribute("data-i") === KL.iv); });
-    var on = [];
-    document.querySelectorAll("#kInd button").forEach(function (b) {
-      var sid = b.getAttribute("data-s"), act = KL.studies ? KL.studies.indexOf(sid) >= 0 : true;
-      b.setAttribute("aria-pressed", act); if (act) on.push(sid);
-    });
-    var box = $("tvChart"); box.innerHTML = "";
-    tvLoad().then(function () {
-      if (!window.TradingView) throw new Error("x");
-      new window.TradingView.widget({
-        container_id: "tvChart", autosize: true, symbol: sym, interval: KL.iv,
-        timezone: "Asia/Taipei", theme: "dark", style: "1", locale: "zh_TW",
-        backgroundColor: "#000000", gridColor: "rgba(255,255,255,0.06)",
-        hide_volume: on.indexOf("Volume@tv-basicstudies") < 0, allow_symbol_change: false,
-        hide_side_toolbar: true, withdateranges: true, save_image: false,
-        studies: on.filter(function (x) { return x !== "Volume@tv-basicstudies"; }),
-        overrides: { "mainSeriesProperties.candleStyle.upColor": "#ff4f5e", "mainSeriesProperties.candleStyle.downColor": "#22c98a", "mainSeriesProperties.candleStyle.borderUpColor": "#ff4f5e", "mainSeriesProperties.candleStyle.borderDownColor": "#22c98a", "mainSeriesProperties.candleStyle.wickUpColor": "#ff4f5e", "mainSeriesProperties.candleStyle.wickDownColor": "#22c98a" }
-      });
-    }).catch(function () {
-      box.innerHTML = '<div class="empty">K 線圖載入失敗，請確認網路連線，或點下面的連結在 TradingView 開啟。</div>';
-    });
+    document.querySelectorAll("#kInd button").forEach(function (b) { b.setAttribute("aria-pressed", KL.on.indexOf(b.getAttribute("data-s")) >= 0); });
+    var first = n ? KL.bars[0].d.replace(/-/g, "/") : "";
+    $("kNote").textContent = "資料來源：證交所每日開高低收與成交量（" + first + " 起），盤後更新；已還原股票分割，未還原除息。手指在圖上滑動看每根 K 棒的數值，下方拉桿往前看，－／＋ 縮放。";
+    kDraw();
   }
+  function kPoint(e) {
+    var r = $("kCanvas").getBoundingClientRect(), x = e.clientX - r.left, PW = r.width - 54;
+    var N = Math.min(KL.n, KL.bars.length), st = Math.min(KL.bars.length, Math.max(N, KL.end)) - N;
+    KL.cur = Math.max(st, Math.min(st + N - 1, st + Math.floor((x - 4) / (PW / N))));
+    kDraw();
+  }
+  $("kCanvas").addEventListener("pointerdown", function (e) { kPoint(e); $("kCanvas").setPointerCapture(e.pointerId); });
+  $("kCanvas").addEventListener("pointermove", function (e) { if (e.buttons || e.pointerType === "touch") kPoint(e); });
+  $("kPan").addEventListener("input", function () { KL.end = +$("kPan").value; KL.cur = -1; kDraw(); });
+  function kZoom(f) { var n = KL.bars.length; KL.n = Math.max(20, Math.min(n, Math.round(KL.n * f))); $("kPan").min = Math.min(n, KL.n); if (KL.end < KL.n) KL.end = KL.n; $("kPan").value = KL.end; KL.cur = -1; kDraw(); }
+  $("kZoomIn").addEventListener("click", function () { kZoom(0.7); });
+  $("kZoomOut").addEventListener("click", function () { kZoom(1.4); });
   $("kOpen").addEventListener("click", function () {
-    $("kSheet").hidden = false; document.body.style.overflow = "hidden"; kRender();
+    $("kSheet").hidden = false; document.body.style.overflow = "hidden";
+    requestAnimationFrame(kSetup);
   });
-  $("kClose").addEventListener("click", function () {
-    $("kSheet").hidden = true; document.body.style.overflow = ""; $("tvChart").innerHTML = "";
-  });
+  $("kClose").addEventListener("click", function () { $("kSheet").hidden = true; document.body.style.overflow = ""; });
   $("kIntv").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-i]"); if (!b) return;
-    KL.iv = b.getAttribute("data-i"); LS.set("beat0050.kiv", KL.iv); kRender();
+    var iv = b.getAttribute("data-i");
+    if (["D", "W", "M"].indexOf(iv) < 0) { $("kInfo").innerHTML = "<b>分鐘 K 製作中</b>：需要富果行情 API 金鑰（方案 2），完成後這幾個按鈕就能使用。"; return; }
+    KL.iv = iv; LS.set("beat0050.kiv2", iv); kSetup();
   });
   $("kInd").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-s]"); if (!b) return;
-    var all = Array.prototype.map.call(document.querySelectorAll("#kInd button"), function (x) { return x.getAttribute("data-s"); });
-    var cur_ = KL.studies || all.slice(), sid = b.getAttribute("data-s"), i = cur_.indexOf(sid);
-    if (i >= 0) cur_.splice(i, 1); else cur_.push(sid);
-    KL.studies = cur_; LS.set("beat0050.kst", JSON.stringify(cur_)); kRender();
+    var k = b.getAttribute("data-s"), i = KL.on.indexOf(k);
+    if (i >= 0) KL.on.splice(i, 1); else KL.on.push(k);
+    LS.set("beat0050.kon", JSON.stringify(KL.on));
+    b.setAttribute("aria-pressed", i < 0); kDraw();
   });
+  window.addEventListener("resize", function () { if (!$("kSheet").hidden) kDraw(); });
   document.addEventListener("keydown", function (e) { if (e.key === "Escape" && !$("kSheet").hidden) $("kClose").click(); });
 
   function renderBadge() {
