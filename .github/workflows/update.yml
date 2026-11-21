@@ -48,7 +48,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data
+          # 個股檔（data/stocks）每次都會重新產生，不存進 git，避免專案越來越大
+          git rm -r -q --cached data/stocks 2>/dev/null || true
+          git add -A -- data ':!data/stocks'
           git diff --cached --quiet && exit 0
           git commit -m "更新股市資料"
           for i in 1 2 3; do
