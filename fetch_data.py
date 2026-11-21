@@ -304,6 +304,18 @@ def parse_tpex_inst(rows):
         i_t = fidx(f, "投信", "買賣超")
         i_d = fidx(f, "自營商", "買賣超", avoid=("外資", "自行", "避險"))
         i_d1, i_d2 = fidx(f, "自營商", "自行", "買賣超"), fidx(f, "自營商", "避險", "買賣超")
+        if not OTC.get("shown"):
+            OTC["shown"] = True
+            print("  櫃買中心三大法人欄位：" + "｜".join(f), flush=True)
+        # 新版表格是兩層標題，下層欄位名稱重複（買進／賣出／買賣超），改用固定順序：
+        # 外資(不含自營商)、外資自營商、外資合計、投信、自營商(自行)、自營商(避險)、自營商合計、三大法人合計
+        if (i_f < 0 and i_f1 < 0) or i_t < 0:
+            L = [i for i, x in enumerate(f) if "買賣超" in x or "淨" in x]
+            if len(L) >= 8:
+                i_f, i_t, i_d, i_tot = L[2], L[3], L[6], L[-1]
+            elif len(f) >= 24:
+                i_f, i_t, i_d, i_tot = 10, 13, 22, 23
+            i_f1 = i_f2 = i_d1 = i_d2 = -1
         for row in data:
             code = clean(row[ic]) if ic < len(row) else ""
             if not CODE_RE.match(code):
@@ -330,7 +342,7 @@ def fetch_day(day, full=True):
     need_i = full and not old.get("i")
     need_m = full and not old.get("m")
     need_po = otc_ok() and not has_ohlc(old.get("po"))
-    need_io = otc_ok() and full and not old.get("io")
+    need_io = otc_ok() and full and (not old.get("io") or old.get("iov") != 2)
     if not (need_p or need_i or need_m or need_po or need_io):
         return True
     if not old and day.weekday() >= 5:
@@ -372,7 +384,7 @@ def fetch_day(day, full=True):
         io = get_tpex("inst", TPEX_INST_URLS, None, parse_tpex_inst, w=day.strftime("%Y/%m/%d"), r=roc(day)) or {}
     os.makedirs(RAW, exist_ok=True)
     with open(raw_path(day), "w", encoding="utf-8") as fh:
-        json.dump({"date": day.isoformat(), "p": prices, "i": inst, "m": margin, "po": po, "io": io}, fh, ensure_ascii=False, separators=(",", ":"))
+        json.dump({"date": day.isoformat(), "p": prices, "i": inst, "m": margin, "po": po, "io": io, "iov": 2 if io else 0}, fh, ensure_ascii=False, separators=(",", ":"))
     print(f"  完成：上市 {len(prices)} 檔、上櫃 {len(po)} 檔收盤價，法人 {len(inst)}＋{len(io)} 檔，維持率 {margin['r'] if margin else '—'}", flush=True)
     return True
 
