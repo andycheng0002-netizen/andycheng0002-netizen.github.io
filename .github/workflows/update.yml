@@ -2,9 +2,9 @@ name: 更新股市資料
 
 on:
   schedule:
-    - cron: "30 9 * * 1-5"
-    - cron: "30 14 * * 1-5"
-    - cron: "*/30 1-5 * * 1-5"
+    - cron: "13 9 * * 1-5"
+    - cron: "47 14 * * 1-5"
+    - cron: "7,37 1-5 * * 1-5"
   push:
     branches: [main]
     paths-ignore: ["data/**"]
@@ -39,7 +39,7 @@ jobs:
           BACKFILL: ${{ inputs.backfill }}
           SCHED: ${{ github.event.schedule }}
         run: |
-          if [ "$SCHED" = "*/30 1-5 * * 1-5" ]; then
+          if [ "$SCHED" = "7,37 1-5 * * 1-5" ]; then
             python3 fetch_data.py --intraday
           else
             python3 fetch_data.py --backfill "${BACKFILL:-0}"
