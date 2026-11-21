@@ -249,6 +249,23 @@ footer { font-size: 12.5px; color: var(--muted); max-width: 62ch; }
 nav.tabs .in { grid-template-columns: repeat(5, 1fr) !important; }
 nav.tabs a { font-size: 11px; }
 
+/* K-line sheet (TradingView) */
+.kbtn { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 7px 14px; border-radius: 999px; border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 700; }
+.kbtn svg { width: 18px; height: 18px; }
+.ksheet { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; flex-direction: column; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+.ksheet .kh { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px max(12px, env(safe-area-inset-right, 0px)) 6px max(12px, env(safe-area-inset-left, 0px)); }
+.ksheet .kh h2 { font-size: 18px; }
+.ksheet .kh button { background: var(--surface-2); border: 1px solid var(--line); color: var(--fg); padding: 6px 14px; border-radius: 999px; }
+.kbar { display: flex; gap: 6px; overflow-x: auto; padding: 4px max(12px, env(safe-area-inset-left, 0px)); scrollbar-width: none; }
+.kbar::-webkit-scrollbar { display: none; }
+.kbar button { flex: none; background: var(--surface); border: 1px solid var(--line); color: var(--muted); font-size: 13px; font-family: var(--font-num); padding: 6px 11px; border-radius: 8px; }
+.kbar button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.kbar.ind button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.kchart { flex: 1; min-height: 0; margin: 6px 0 0; position: relative; }
+.kchart #tvChart { position: absolute; inset: 0; }
+.knote { font-size: 11.5px; color: var(--muted); padding: 6px max(12px, env(safe-area-inset-left, 0px)); }
+.knote a { color: var(--accent); }
+
 /* Bottom tab bar */
 nav.tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; justify-content: center;
@@ -293,6 +310,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
         <div style="text-align:right">
           <div class="px" id="sPx"></div>
           <div class="chg" id="sChg"></div>
+          <button type="button" class="kbtn" id="kOpen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 4v16M6 8h-2v6h2M12 3v18M12 6h-2v9h2M18 6v14M18 10h-2v5h2"/></svg>K 線技術分析</button>
         </div>
       </div>
 
@@ -493,7 +511,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       <div class="label">策略排行（點一列看細節）</div>
       <div class="panel tablebox">
         <table class="rank" id="rankTable">
-          <thead><tr><th>策略</th><th>年化報酬</th><th>月勝率</th><th>最大回撤</th></tr></thead>
+          <thead><tr><th>策略</th><th>年化報酬</th><th>月勝率*</th><th>最大回撤</th><th>報酬÷回撤</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -568,6 +586,18 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       </div>
     </section>
   </div>
+</div>
+
+<div class="ksheet" id="kSheet" hidden role="dialog" aria-modal="true" aria-labelledby="kTitle">
+  <div class="kh"><h2 id="kTitle">K 線</h2><button type="button" id="kClose">關閉</button></div>
+  <div class="kbar" id="kIntv" aria-label="K 線週期">
+    <button type="button" data-i="1">1分</button><button type="button" data-i="5">5分</button><button type="button" data-i="15">15分</button><button type="button" data-i="30">30分</button><button type="button" data-i="60">60分</button><button type="button" data-i="D" aria-pressed="true">日線</button><button type="button" data-i="W">週線</button><button type="button" data-i="M">月線</button>
+  </div>
+  <div class="kbar ind" id="kInd" aria-label="技術指標">
+    <button type="button" data-s="Volume@tv-basicstudies" aria-pressed="true">Vol</button><button type="button" data-s="MACD@tv-basicstudies" aria-pressed="true">MACD</button><button type="button" data-s="WilliamR@tv-basicstudies" aria-pressed="true">威廉</button><button type="button" data-s="DM@tv-basicstudies" aria-pressed="true">DMI</button><button type="button" data-s="Stochastic@tv-basicstudies" aria-pressed="true">KD</button><button type="button" data-s="RSI@tv-basicstudies" aria-pressed="true">RSI</button>
+  </div>
+  <div class="kchart"><div id="tvChart"></div></div>
+  <div class="knote">圖表與資料由 TradingView 提供，台股報價可能有延遲；指標太多擠不下時，點上面的指標按鈕關掉幾個。看不到圖？<a id="kExt" href="https://www.tradingview.com/" target="_blank" rel="noopener">在 TradingView 開啟</a></div>
 </div>
 
 <nav class="tabs" aria-label="功能">
@@ -1029,11 +1059,14 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
     state.results = {};
     ORDER.forEach(function (k) {
       var bt = backtest(state.D, k, state.cost), st = stats(bt.map(function (x) { return x.ret; }));
-      st.win = bt.filter(function (x) { return x.ret > x.bench; }).length / bt.length;
+      var nw = bt.filter(function (x) { return x.ret - x.bench > 1e-6; }).length, nl = bt.filter(function (x) { return x.bench - x.ret > 1e-6; }).length;
+      st.win = nw + nl ? nw / (nw + nl) : 0; st.tie = (bt.length - nw - nl) / bt.length; st.nw = nw; st.nl = nl;
+      st.calmar = st.mdd < 0 ? st.cagr / -st.mdd : 0;
       state.results[k] = { bt: bt, st: st };
     });
     var any = state.results[ORDER[0]];
     state.benchStats = stats(any.bt.map(function (x) { return x.bench; }));
+    state.benchStats.calmar = state.benchStats.mdd < 0 ? state.benchStats.cagr / -state.benchStats.mdd : 0;
     // 只保留最大回撤不比 0050 深的策略
     var bm = state.benchStats.mdd;
     state.pass = ORDER.filter(function (k) { return state.results[k] && state.results[k].st.mdd >= bm; });
@@ -1049,14 +1082,14 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
         rows.push('<tr tabindex="0" data-k="' + k + '"' + (k === state.sel ? ' class="sel"' : "") + '>' +
           '<td><span class="sname">' + S[k].name + '</span><span class="stag">' + S[k].tag + '</span></td>' +
           '<td class="num ' + (st.cagr > b.cagr ? "up" : "down") + '">' + pct(st.cagr) + '</td>' +
-          '<td class="num">' + pct(st.win, 0) + '</td><td class="num">' + pct(st.mdd) + '</td></tr>');
+          '<td class="num">' + pct(st.win, 0) + (st.tie > 0.05 ? '<span class="stag">平手 ' + pct(st.tie, 0) + "</span>" : "") + '</td><td class="num">' + pct(st.mdd) + '</td><td class="num ' + (st.calmar > b.calmar ? "up" : "") + '">' + st.calmar.toFixed(2) + '</td></tr>');
       });
     rows.push('<tr class="bench"><td><span class="sname">0050 基準</span><span class="stag">買進持有</span></td>' +
-      '<td class="num">' + pct(b.cagr) + '</td><td class="num">—</td><td class="num">' + pct(b.mdd) + '</td></tr>');
-    if (!state.pass.length) rows.unshift('<tr><td colspan="4" class="muted" style="white-space:normal">目前沒有任何策略的最大回撤比 0050 淺。</td></tr>');
+      '<td class="num">' + pct(b.cagr) + '</td><td class="num">—</td><td class="num">' + pct(b.mdd) + '</td><td class="num">' + b.calmar.toFixed(2) + '</td></tr>');
+    if (!state.pass.length) rows.unshift('<tr><td colspan="5" class="muted" style="white-space:normal">目前沒有任何策略的最大回撤比 0050 淺。</td></tr>');
     document.querySelector("#rankTable tbody").innerHTML = rows.join("");
     var bt = state.results[ORDER[0]].bt;
-    var note = (state.demo ? "目前是模擬數據（證交所真實資料還沒準備好）。" : state.D.real ? "證交所真實資料，股價含配息還原，選股池為每月成交金額前 50 大。" : "") + "回測期間 " + bt[0].date + " 至 " + bt[bt.length - 1].date + "，共 " + bt.length + " 個月。年化報酬紅色代表贏過 0050。只列出最大回撤不比 0050 深（" + pct(b.mdd) + "）的策略。";
+    var note = (state.demo ? "目前是模擬數據（證交所真實資料還沒準備好）。" : state.D.real ? "證交所真實資料，股價含配息還原，選股池為每月成交金額前 50 大。" : "") + "回測期間 " + bt[0].date + " 至 " + bt[bt.length - 1].date + "，共 " + bt.length + " 個月。年化報酬紅色代表贏過 0050。只列出最大回撤不比 0050 深（" + pct(b.mdd) + "）的策略。＊月勝率不含和 0050 報酬相同的月份（平手）。報酬÷回撤越高越好，紅色代表比 0050 好。";
     if (state.drop.length) note += " 已排除：" + state.drop.map(function (k) { return S[k].name + "（回撤 " + pct(state.results[k].st.mdd) + "）"; }).join("、") + "。";
     $("periodNote").textContent = note;
     $("btDetail").hidden = !state.sel;
@@ -1117,7 +1150,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
     var avgEx = bt.reduce(function (s, x) { return s + x.ret - x.bench; }, 0) / bt.length;
     var tiles = [
       ["累積報酬", '<span class="' + cls(st.total) + '">' + pct(st.total, 0, true) + '</span>', "0050 " + pct(b.total, 0, true)],
-      ["月勝率", pct(st.win, 0), "近 12 月贏 " + w12 + " 次"],
+      ["月勝率", pct(st.win, 0), "贏 " + st.nw + "・輸 " + st.nl + "・平 " + Math.round(st.tie * bt.length) + " 個月"],
       ["平均每月超額", '<span class="' + cls(avgEx) + '">' + pct(avgEx, 2, true) + '</span>', "策略 − 0050"],
       ["最大回撤", pct(st.mdd), "0050 " + pct(b.mdd)]
     ];
@@ -1127,7 +1160,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
       var d = x.ret - x.bench, win = d > 0;
       return '<tr><td><span class="num">' + x.date + '</span><span class="h">' + holdLabel(x.w) + '</span></td>' +
         '<td class="num ' + cls(x.ret) + '">' + pct(x.ret, 1, true) + '</td><td class="num ' + cls(x.bench) + '">' + pct(x.bench, 1, true) + '</td>' +
-        '<td class="num ' + cls(d) + '">' + pct(d, 1, true) + '</td><td><span class="chip ' + (win ? "win" : "lose") + '">' + (win ? "贏" : "輸") + '</span></td></tr>';
+        '<td class="num ' + cls(d) + '">' + pct(d, 1, true) + '</td><td><span class="chip ' + (Math.abs(d) < 1e-6 ? "flat" : win ? "win" : "lose") + '">' + (Math.abs(d) < 1e-6 ? "平" : win ? "贏" : "輸") + '</span></td></tr>';
     }).join("");
   }
   function renderBacktest() { runAll(); renderRank(); renderDetail(); }
@@ -1613,7 +1646,7 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
 
       // Diverging tug-of-war list
       var list = top.slice();
-      if (CB.sort === "pts") list.sort(function (a, b) { return b.pts - a.pts; });
+      if (CB.sort === "pts") list.sort(function (a, b) { return Math.abs(b.pts) - Math.abs(a.pts); });
       $("cbSortPts").setAttribute("aria-selected", CB.sort === "pts"); $("cbSortCap").setAttribute("aria-selected", CB.sort !== "pts");
       var mx = Math.sqrt(Math.max.apply(null, list.map(function (r) { return Math.abs(r.pts); })) || 1);
       $("cbDv").innerHTML = list.map(function (r) {
@@ -1770,6 +1803,65 @@ nav.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4p
     var b = e.target.closest("button[data-n]"); if (!b) return;
     FU.n = +b.getAttribute("data-n"); renderFutures();
   });
+
+  /* ---------- K 線技術分析（TradingView） ---------- */
+  var KL = { iv: "D", studies: null, loaded: null };
+  try { KL.iv = LS.get("beat0050.kiv") || "D"; KL.studies = JSON.parse(LS.get("beat0050.kst") || "null"); } catch (e) {}
+  function tvLoad() {
+    if (KL.loaded) return KL.loaded;
+    KL.loaded = new Promise(function (res, rej) {
+      var sc = document.createElement("script");
+      sc.src = "https://s3.tradingview.com/tv.js"; sc.async = true;
+      sc.onload = function () { res(); }; sc.onerror = function () { KL.loaded = null; rej(); };
+      document.head.appendChild(sc);
+    });
+    return KL.loaded;
+  }
+  function tvSymbol() { return "TWSE:" + (cur || "2330"); }
+  function kRender() {
+    var sym = tvSymbol();
+    $("kTitle").textContent = (cur || "") + " " + (NAMES[cur] || "") + "　K 線";
+    $("kExt").href = "https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(sym);
+    document.querySelectorAll("#kIntv button").forEach(function (b) { b.setAttribute("aria-pressed", b.getAttribute("data-i") === KL.iv); });
+    var on = [];
+    document.querySelectorAll("#kInd button").forEach(function (b) {
+      var sid = b.getAttribute("data-s"), act = KL.studies ? KL.studies.indexOf(sid) >= 0 : true;
+      b.setAttribute("aria-pressed", act); if (act) on.push(sid);
+    });
+    var box = $("tvChart"); box.innerHTML = "";
+    tvLoad().then(function () {
+      if (!window.TradingView) throw new Error("x");
+      new window.TradingView.widget({
+        container_id: "tvChart", autosize: true, symbol: sym, interval: KL.iv,
+        timezone: "Asia/Taipei", theme: "dark", style: "1", locale: "zh_TW",
+        backgroundColor: "#000000", gridColor: "rgba(255,255,255,0.06)",
+        hide_volume: on.indexOf("Volume@tv-basicstudies") < 0, allow_symbol_change: false,
+        hide_side_toolbar: true, withdateranges: true, save_image: false,
+        studies: on.filter(function (x) { return x !== "Volume@tv-basicstudies"; }),
+        overrides: { "mainSeriesProperties.candleStyle.upColor": "#ff4f5e", "mainSeriesProperties.candleStyle.downColor": "#22c98a", "mainSeriesProperties.candleStyle.borderUpColor": "#ff4f5e", "mainSeriesProperties.candleStyle.borderDownColor": "#22c98a", "mainSeriesProperties.candleStyle.wickUpColor": "#ff4f5e", "mainSeriesProperties.candleStyle.wickDownColor": "#22c98a" }
+      });
+    }).catch(function () {
+      box.innerHTML = '<div class="empty">K 線圖載入失敗，請確認網路連線，或點下面的連結在 TradingView 開啟。</div>';
+    });
+  }
+  $("kOpen").addEventListener("click", function () {
+    $("kSheet").hidden = false; document.body.style.overflow = "hidden"; kRender();
+  });
+  $("kClose").addEventListener("click", function () {
+    $("kSheet").hidden = true; document.body.style.overflow = ""; $("tvChart").innerHTML = "";
+  });
+  $("kIntv").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-i]"); if (!b) return;
+    KL.iv = b.getAttribute("data-i"); LS.set("beat0050.kiv", KL.iv); kRender();
+  });
+  $("kInd").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-s]"); if (!b) return;
+    var all = Array.prototype.map.call(document.querySelectorAll("#kInd button"), function (x) { return x.getAttribute("data-s"); });
+    var cur_ = KL.studies || all.slice(), sid = b.getAttribute("data-s"), i = cur_.indexOf(sid);
+    if (i >= 0) cur_.splice(i, 1); else cur_.push(sid);
+    KL.studies = cur_; LS.set("beat0050.kst", JSON.stringify(cur_)); kRender();
+  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && !$("kSheet").hidden) $("kClose").click(); });
 
   function renderBadge() {
     var view = currentView(), badge = $("dataBadge");
