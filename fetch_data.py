@@ -719,16 +719,14 @@ def update_futures(today, last_trade=None):
 
     # 三大法人臺指選擇權：淨留倉（口）＝買權淨未平倉 − 賣權淨未平倉
     om = fut["opt"]
-    for a, b in chunks(list(om.keys())):
-        txt = get_raw(TAIFEX_OPT_URL, {"queryStartDate": a.strftime("%Y/%m/%d"), "queryEndDate": b.strftime("%Y/%m/%d"), "commodityId": "TXO"})
-        time.sleep(PAUSE)
-        if not txt or "查無資料" in txt:
-            continue
-        rows = parse_csv_text(txt)
+
+    def parse_opt(txt):
+        rows = parse_csv_text(txt) if txt else []
         if len(rows) < 2:
-            continue
+            return {}
         h = rows[0]
         i_cp, i_who = col(h, "買賣權", default=2), col(h, "身份", default=3)
+        i_pd = col(h, "商品", default=1)
         i_net = col(h, "未平倉", "口數", "淨額", default=14)
         i_amt = col(h, "未平倉", "金額", "淨額", default=15)
         fresh = {}
@@ -738,7 +736,11 @@ def update_futures(today, last_trade=None):
             iso = row[0].replace("/", "-")
             if not re.match(r"^\d{4}-\d{2}-\d{2}$", iso):
                 continue
-            sign = 1 if "買權" in row[i_cp] else -1 if "賣權" in row[i_cp] else 0
+            pd_ = row[i_pd] if 0 <= i_pd < len(row) else ""
+            if pd_ and not ("臺指" in pd_ or "台指" in pd_ or "TXO" in pd_.upper()):
+                continue  # 只要臺指選擇權
+            cp = row[i_cp].upper()
+            sign = 1 if ("買權" in cp or "CALL" in cp) else -1 if ("賣權" in cp or "PUT" in cp) else 0
             who = row[i_who]
             k = 0 if "外資" in who else 1 if "投信" in who else 2 if "自營" in who else -1
             n, amt = first_num(row[i_net]), first_num(row[i_amt])
@@ -747,6 +749,24 @@ def update_futures(today, last_trade=None):
             rec = fresh.setdefault(iso, [0, 0, 0, 0, 0, 0])
             rec[k] += sign * n
             rec[3 + k] += sign * (amt or 0)
+        return fresh
+
+    shown = False
+    for a, b in chunks(list(om.keys())):
+        base = {"queryStartDate": a.strftime("%Y/%m/%d"), "queryEndDate": b.strftime("%Y/%m/%d")}
+        fresh, txt = {}, None
+        # 先指定臺指選擇權；抓不到就改抓「全部」再自己篩出臺指選擇權
+        for extra in ({"commodityId": "TXO"}, {"commodityId": ""}, {}):
+            txt = get_raw(TAIFEX_OPT_URL, dict(base, **extra))
+            time.sleep(PAUSE)
+            if txt and "查無資料" not in txt:
+                fresh = parse_opt(txt)
+                if fresh:
+                    break
+        if not fresh and not shown:
+            shown = True
+            head = (txt or "（沒有回應）").replace("\n", " ")[:200]
+            print(f"  選擇權三大法人抓不到，期交所回應開頭：{head}", flush=True)
         om.update(fresh)
     print(f"選擇權三大法人：{len(om)} 天", flush=True)
 
